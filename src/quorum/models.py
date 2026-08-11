@@ -249,6 +249,30 @@ class Commitment(Grounded):
         return self.strength is CommitmentStrength.FIRM and self.assignee.speaker_id is not None
 
 
+class StatusKind(str, Enum):
+    DELIVERED = "delivered"
+    SLIPPED = "slipped"
+    BLOCKED = "blocked"
+    CANCELLED = "cancelled"
+
+
+class StatusUpdate(Grounded):
+    """News about a commitment made in an *earlier* meeting.
+
+    This is what makes tracking cross-meeting rather than per-meeting. "I didn't
+    get to the spec, I'll have it Friday" creates nothing new - it moves an
+    existing obligation. Without this, every restatement looks like a fresh
+    commitment and the open list fills with duplicates of the same work.
+    """
+
+    about: str
+    """The work being referred to, as spoken. Matched against the ledger."""
+
+    kind: StatusKind
+    blocker: str | None = None
+    new_deadline_text: str | None = None
+
+
 class Decision(Grounded):
     """A choice the group made. Tracked across meetings so reversals are detectable."""
 
@@ -283,6 +307,7 @@ class MeetingRecord(BaseModel):
     decisions: list[Decision] = Field(default_factory=list)
     open_questions: list[OpenQuestion] = Field(default_factory=list)
     risks: list[Risk] = Field(default_factory=list)
+    status_updates: list[StatusUpdate] = Field(default_factory=list)
 
     # --- provenance for the metrics dashboard ---
     extracted_at: datetime = Field(default_factory=datetime.now)

@@ -37,6 +37,8 @@ from quorum.models import (
     OpenQuestion,
     Risk,
     Segment,
+    StatusKind,
+    StatusUpdate,
     Transcript,
 )
 
@@ -81,11 +83,26 @@ class RawRisk(BaseModel):
     evidence: list[RawEvidence]
 
 
+class RawStatusUpdate(BaseModel):
+    """News about work committed to in an earlier meeting."""
+
+    about: str = Field(description="The work being referred to, as spoken")
+    kind: Literal["delivered", "slipped", "blocked", "cancelled"]
+    blocker: str | None = Field(
+        default=None, description="For 'blocked': the work it is waiting on"
+    )
+    new_deadline_text: str | None = Field(
+        default=None, description="For 'slipped': the new timing, as spoken"
+    )
+    evidence: list[RawEvidence]
+
+
 class SegmentExtraction(BaseModel):
     commitments: list[RawCommitment] = Field(default_factory=list)
     decisions: list[RawDecision] = Field(default_factory=list)
     open_questions: list[RawOpenQuestion] = Field(default_factory=list)
     risks: list[RawRisk] = Field(default_factory=list)
+    status_updates: list[RawStatusUpdate] = Field(default_factory=list)
 
 
 SYSTEM_PROMPT = """\
@@ -119,7 +136,20 @@ A question ("can you review it?") is not a commitment. The *answer* to it
 ("sure, I'll review it") is.
 
 Do not record a commitment for work that was discussed but never accepted by
-anyone."""
+anyone.
+
+STATUS UPDATES - news about work promised in an EARLIER meeting
+
+These are not new commitments. Put them in status_updates, not commitments:
+
+  delivered  "I sent that Tuesday", "the migration is merged", "that's done"
+  slipped    "I didn't get to it, I'll have it Friday" - also give the new timing
+  blocked    "I can't start X until Y is done" - also give what it waits on
+  cancelled  "let's drop that", "we don't need it any more"
+
+A slip is the SAME obligation with a later date, never a second one. If someone
+reports a slip and restates the work, record one status_update and no new
+commitment."""
 
 
 @dataclass
@@ -157,11 +187,15 @@ class ExtractionResult:
     decisions: list[Decision] = field(default_factory=list)
     open_questions: list[OpenQuestion] = field(default_factory=list)
     risks: list[Risk] = field(default_factory=list)
+    status_updates: list[StatusUpdate] = field(default_factory=list)
     stats: ExtractionStats = field(default_factory=ExtractionStats)
 
     @property
     def all_items(self) -> list:
-        return [*self.commitments, *self.decisions, *self.open_questions, *self.risks]
+        return [
+            *self.commitments, *self.decisions, *self.open_questions,
+            *self.risks, *self.status_updates,
+        ]
 
 
 class Extractor:
@@ -291,6 +325,20 @@ class Extractor:
                         meeting_id=transcript.meeting_id,
                         description=risk.description,
                         severity=risk.severity,
+                        evidence=evidence,
+                    )
+                )
+
+        for update in raw.status_updates:
+            evidence = self._to_evidence(update.evidence, transcript, segment)
+            if evidence:
+                result.status_updates.append(
+                    StatusUpdate(
+                        meeting_id=transcript.meeting_id,
+                        about=update.about,
+                        kind=StatusKind(update.kind),
+                        blocker=update.blocker,
+                        new_deadline_text=update.new_deadline_text,
                         evidence=evidence,
                     )
                 )
