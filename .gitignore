@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Secrets - never commit
+.env
+*.key
+credentials.json
+token.json
+client_secret*.json
+
+# Data & caches (large / regenerable)
+data/raw/
+data/ami/
+data/synthetic/
+.cache/
+llm_cache/
+*.lance/
+lancedb/
+
+# Eval outputs
+runs/
+reports/*.html
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local tool settings (machine-specific)
+.claude/settings.local.json

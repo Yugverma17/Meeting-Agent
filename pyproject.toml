@@ -1,0 +1,25 @@
+[project]
+name = "quorum"
+version = "0.1.0"
+description = "An agent that tracks what people commit to in meetings, verifies whether it actually happened, and chases it when it didn't."
+requires-python = ">=3.11"
+readme = "README.md"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+markers = [
+    "live: hits a real LLM provider; consumes free-tier quota (deselect with -m 'not live')",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
