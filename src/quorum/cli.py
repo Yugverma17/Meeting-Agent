@@ -321,6 +321,281 @@ def guard(model: bool = typer.Option(False, help="Also use the prompt-guard clas
     )
 
 
+def _load_project(name: str):
+    """Resolve a project by name, or exit with the list of what exists."""
+    from quorum.workspace import Workspace
+
+    workspace = Workspace()
+    if not name:
+        projects = workspace.list()
+        if len(projects) == 1:
+            name = projects[0].id
+        else:
+            console.print("[red]Specify --project.[/red]")
+            if projects:
+                console.print("Available: " + ", ".join(p.id for p in projects))
+            else:
+                console.print('Create one: [bold]quorum project --create "My Project"[/bold]')
+            raise typer.Exit(1)
+
+    project = workspace.get(name)
+    if project is None:
+        console.print(f"[red]No project {name!r}.[/red] "
+                      "Run [bold]quorum project[/bold] to list them.")
+        raise typer.Exit(1)
+    return workspace, project
+
+
+@app.command()
+def project(
+    create: str = typer.Option("", help="Create a project with this name."),
+    show: str = typer.Option("", help="Show one project in detail."),
+    description: str = typer.Option("", help="What the project is."),
+    repo: str = typer.Option("", help='GitHub "owner/name" for delivery verification.'),
+    members: str = typer.Option("", help='"Priya:priya@x.com,Sam:sam@x.com"'),
+) -> None:
+    """Create or list projects. A project gives meetings shared context."""
+    from quorum.workspace import Workspace
+
+    setup_logging("WARNING")
+    ensure_dirs()
+    workspace = Workspace()
+
+    if create:
+        people = {}
+        for entry in (m for m in members.split(",") if m.strip()):
+            name, _, email = entry.partition(":")
+            people[name.strip()] = email.strip()
+        try:
+            made = workspace.create(create, description, repo or None, people)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
+        console.print(f"[green]Created[/green] [bold]{made.meta.id}[/bold]")
+        console.print(f"  Record into it: [bold]quorum record --project {made.meta.id}[/bold]")
+        return
+
+    if show:
+        _, found = _load_project(show)
+        ledger = found.ledger
+        console.print(f"[bold]{found.meta.name}[/bold] ({found.meta.id})")
+        if found.meta.description:
+            console.print(f"  {found.meta.description}")
+        console.print(f"  meetings: {found.meta.meeting_count}   "
+                      f"last: {found.meta.last_meeting_on or '-'}")
+        console.print(f"  open commitments: {len(ledger.open_commitments())}")
+        if found.meta.repo:
+            console.print(f"  repo: {found.meta.repo}")
+        if found.meta.members:
+            console.print("  members: " + ", ".join(
+                f"{n} <{e}>" for n, e in found.meta.members.items()))
+        return
+
+    projects = workspace.list()
+    if not projects:
+        console.print("[dim]No projects yet.[/dim]")
+        console.print('Create one: [bold]quorum project --create "Ingestion revamp"[/bold]')
+        return
+
+    table = Table(title="Projects", header_style="bold")
+    table.add_column("id")
+    table.add_column("name")
+    table.add_column("meetings", justify="right")
+    table.add_column("last meeting")
+    for meta in projects:
+        table.add_row(meta.id, meta.name, str(meta.meeting_count), meta.last_meeting_on or "-")
+    console.print(table)
+
+
+@app.command()
+def status(project_name: str = typer.Option("", "--project", help="Which project.")) -> None:
+    """Everything still open: who owes what, and what is late."""
+    from datetime import date as _date
+
+    setup_logging("WARNING")
+    _, found = _load_project(project_name)
+    ledger = found.ledger
+    today_date = _date.today()
+    open_items = ledger.open_commitments()
+
+    if not open_items:
+        console.print(f"[green]Nothing open on {found.meta.name}.[/green]")
+        return
+
+    table = Table(title=f"{found.meta.name} - open commitments", header_style="bold")
+    table.add_column("Owner")
+    table.add_column("Commitment", overflow="fold")
+    table.add_column("Due")
+    table.add_column("Status")
+
+    for item in sorted(open_items, key=lambda c: (c.deadline.resolved or _date.max)):
+        due = item.deadline.resolved
+        if due is None:
+            state = "[dim]no date[/dim]"
+        elif due < today_date:
+            state = f"[red]{(today_date - due).days}d late[/red]"
+        elif due == today_date:
+            state = "[yellow]due today[/yellow]"
+        else:
+            state = f"in {(due - today_date).days}d"
+        table.add_row(
+            item.assignee.display_name or "[dim]unassigned[/dim]",
+            item.description,
+            due.isoformat() if due else "-",
+            state,
+        )
+    console.print(table)
+    console.print(f"\n[dim]{len(open_items)} open. "
+                  f"Run [bold]quorum today[/bold] to see what to chase.[/dim]")
+
+
+@app.command()
+def today(
+    project_name: str = typer.Option("", "--project", help="Which project."),
+    check_github: bool = typer.Option(True, help="Verify delivery against GitHub."),
+) -> None:
+    """The daily sweep: what to chase, close, escalate or flag - with drafts."""
+    from datetime import date as _date
+
+    from quorum.execution import ApprovalGate, build_digests
+    from quorum.tracking import ActionType, Planner
+    from quorum.verify import GitHubEvidenceProvider
+    from quorum.verify.github import GitHubConfig
+
+    setup_logging("WARNING")
+    settings = get_settings()
+    workspace, found = _load_project(project_name)
+    ledger = found.ledger
+    now = _date.today()
+
+    evidence = None
+    if check_github and settings.github_token and found.meta.repo:
+        evidence = GitHubEvidenceProvider(
+            settings.github_token, GitHubConfig(repo=found.meta.repo)
+        )
+    elif check_github and not settings.github_token:
+        console.print("[dim]No GITHUB_TOKEN set - skipping delivery verification.[/dim]")
+
+    with console.status("Planning..."):
+        plan = Planner().plan(ledger, now, evidence)
+    found.save_ledger()
+
+    if not plan.actions:
+        console.print(f"[green]Nothing to do on {found.meta.name}.[/green]")
+        return
+
+    colour = {
+        ActionType.NUDGE: "yellow", ActionType.ESCALATE: "red",
+        ActionType.MARK_DONE: "green", ActionType.MARK_DROPPED: "magenta",
+        ActionType.PROPAGATE_SLIP: "cyan", ActionType.FLAG_CONFLICT: "red",
+    }
+    table = Table(title=f"{found.meta.name} - {now}", header_style="bold")
+    table.add_column("Action")
+    table.add_column("Commitment", overflow="fold")
+    table.add_column("Why", overflow="fold")
+    for action in plan.actions:
+        if action.action is ActionType.WAIT:
+            continue
+        item = ledger.by_id(action.commitment_id)
+        style = colour.get(action.action, "dim")
+        table.add_row(
+            f"[{style}]{action.action.value}[/{style}]",
+            item.description if item else action.commitment_id,
+            action.reason,
+        )
+    console.print(table)
+
+    digests = build_digests(plan.actions, ledger, now)
+    if not digests:
+        console.print("\n[dim]No emails needed today.[/dim]")
+        return
+
+    gate = ApprovalGate()
+    drafts_dir = RUNS_DIR / "drafts" / found.meta.id
+    drafts_dir.mkdir(parents=True, exist_ok=True)
+
+    console.print(f"\n[bold]{len(digests)} email(s) drafted[/bold] "
+                  "[yellow]- awaiting your approval, nothing sent[/yellow]\n")
+    for digest in digests:
+        body = digest.render(ledger, now)
+        gate.propose(
+            plan.actions[0], digest.subject, body=body, recipient=digest.recipient_email
+        )
+        path = drafts_dir / f"{now.isoformat()}_{digest.recipient_email.replace('@', '_at_')}.txt"
+        path.write_text(f"To: {digest.recipient_email}\nSubject: {digest.subject}\n\n{body}",
+                        encoding="utf-8")
+        console.print(f"[bold]To:[/bold] {digest.recipient_email}")
+        console.print(f"[bold]Subject:[/bold] {digest.subject}")
+        console.print(body)
+        console.print(f"[dim]saved to {path}[/dim]\n")
+
+    console.print(
+        "[yellow]Review the drafts, then send them yourself.[/yellow] "
+        "Automatic sending needs Gmail OAuth, which is not wired up."
+    )
+
+
+@app.command()
+def done(
+    what: str = typer.Argument(..., help="Part of the commitment's description."),
+    project_name: str = typer.Option("", "--project", help="Which project."),
+    drop: bool = typer.Option(False, help="Mark abandoned instead of complete."),
+) -> None:
+    """Tell it a commitment is finished (or abandoned)."""
+    from datetime import date as _date
+
+    from rapidfuzz import fuzz
+
+    from quorum.models import CommitmentStatus
+
+    setup_logging("WARNING")
+    _, found = _load_project(project_name)
+    ledger = found.ledger
+
+    candidates = ledger.open_commitments()
+    if not candidates:
+        console.print("[dim]Nothing open.[/dim]")
+        return
+
+    # A vague query matches everything. `done "the"` once closed a real
+    # commitment, and closing the wrong one is silent - nothing later reopens it.
+    filler = {"the", "a", "an", "it", "that", "this", "and", "of", "to", "my", "our"}
+    words = [w for w in what.lower().split() if w not in filler]
+    if len(what.strip()) < 4 or not words:
+        console.print(f"[red]{what!r} is too vague to identify a commitment.[/red] Open:")
+        for item in candidates[:8]:
+            console.print(f"  - {item.description}")
+        raise typer.Exit(1)
+
+    scored = sorted(
+        ((fuzz.token_set_ratio(what.lower(), c.description.lower()), c) for c in candidates),
+        key=lambda pair: -pair[0],
+    )
+    best_score, best = scored[0]
+    if best_score < 55:
+        console.print(f"[red]Nothing matches {what!r}.[/red] Open commitments:")
+        for _, item in scored[:5]:
+            console.print(f"  - {item.description}")
+        raise typer.Exit(1)
+
+    # Ambiguity is resolved by asking, not by picking. Closing the wrong
+    # commitment is silent and nothing later reopens it.
+    if len(scored) > 1 and scored[1][0] >= best_score - 5:
+        console.print(f"[yellow]Ambiguous - {what!r} matches several:[/yellow]")
+        for score, item in scored[:3]:
+            console.print(f"  - {item.description} [dim]({score:.0f})[/dim]")
+        console.print("Be more specific.")
+        raise typer.Exit(1)
+
+    best.status = CommitmentStatus.DROPPED if drop else CommitmentStatus.VERIFIED_DONE
+    best.resolution_note = f"marked {'dropped' if drop else 'done'} by you on {_date.today()}"
+    found.save_ledger()
+
+    verb = "Dropped" if drop else "Closed"
+    console.print(f"[green]{verb}:[/green] {best.description}")
+    console.print(f"[dim]{len(ledger.open_commitments())} still open.[/dim]")
+
+
 @app.command()
 def record(
     minutes: float = typer.Option(0.0, help="Stop after N minutes. 0 = until Ctrl+C."),
@@ -330,6 +605,9 @@ def record(
     me: str = typer.Option("You", help="Your display name."),
     my_email: str = typer.Option("", help="Your email."),
     title: str = typer.Option("Live meeting", help="Meeting title."),
+    project_name: str = typer.Option(
+        "", "--project", help="Save into this project so it accumulates across meetings."
+    ),
     devices: bool = typer.Option(False, help="List audio devices and exit."),
     keep_audio: bool = typer.Option(False, help="Keep the recorded WAV chunks."),
 ) -> None:
@@ -372,6 +650,16 @@ def record(
             console.print("[red]No WASAPI loopback device found[/red] - "
                           "system audio cannot be captured.")
         return
+
+    active_project = None
+    if project_name:
+        _, active_project = _load_project(project_name)
+        # The project's member list seeds the roster, so you do not retype it
+        # before every meeting.
+        if not roster and active_project.meta.members:
+            roster = active_project.roster_string()
+        console.print(f"[dim]Project: {active_project.meta.name} "
+                      f"({active_project.meta.meeting_count} meetings so far)[/dim]")
 
     others = []
     for index, entry in enumerate(p for p in roster.split(",") if p.strip()):
@@ -451,7 +739,10 @@ def record(
                 "loops back through your mic and can be misattributed to you."
             )
 
-    transcript = build_transcript(segments, people, meeting_date=_date.today(), title=title)
+    transcript = build_transcript(
+        segments, people, meeting_date=_date.today(), title=title,
+        project_id=active_project.meta.id if active_project else None,
+    )
     if len(people.others) >= 1:
         with console.status("Attributing speakers..."):
             RemoteSpeakerAttributor().attribute(transcript, people)
@@ -484,6 +775,46 @@ def record(
         f"[dim]{report.rejected} item(s) rejected as ungrounded. "
         f"Nothing was sent - the approval gate is enabled.[/dim]"
     )
+
+    if active_project is None:
+        console.print(
+            "\n[dim]Not saved. Use [bold]--project <name>[/bold] to build history "
+            "across meetings and enable chasing.[/dim]"
+        )
+        return
+
+    from quorum.memory import ProjectMemory
+    from quorum.models import MeetingRecord
+
+    updates, _ = GroundingVerifier().verify(extracted.status_updates, transcript)
+    decisions, _ = GroundingVerifier().verify(extracted.decisions, transcript)
+    meeting_record = MeetingRecord(
+        meeting_id=transcript.meeting_id, project_id=active_project.meta.id,
+        meeting_date=transcript.meeting_date, title=title,
+        commitments=commitments, decisions=decisions, status_updates=updates,
+        rejected_items=report.rejected,
+    )
+
+    before = len(active_project.ledger.open_commitments())
+    active_project.add_meeting(meeting_record, transcript)
+    workspace_ref, _ = _load_project(active_project.meta.id)
+    workspace_ref.save(active_project)
+
+    indexed = 0
+    try:
+        indexed = ProjectMemory(active_project.memory_dir).index_meeting(
+            meeting_record, transcript
+        )
+    except Exception as exc:  # noqa: BLE001 - memory is an optimisation, never a blocker
+        console.print(f"[dim]Could not index into project memory: {exc}[/dim]")
+
+    after = len(active_project.ledger.open_commitments())
+    console.print(
+        f"\n[green]Saved to {active_project.meta.name}.[/green] "
+        f"Open commitments: {before} -> {after}. "
+        f"{len(updates)} status update(s) applied, {indexed} item(s) indexed."
+    )
+    console.print(f"  Next: [bold]quorum today --project {active_project.meta.id}[/bold]")
 
 
 @app.command()

@@ -244,6 +244,52 @@ Built on **free-tier APIs only**, on a laptop with **7.6 GB RAM and no GPU**:
 - **Gmail and Calendar transports are dry-run.** The approval gate, digest
   building and evidence interface are real and tested; OAuth is not wired.
 
+## Using it week to week
+
+A project is what makes meetings accumulate. Without one, `record` analyses a
+single meeting and forgets it.
+
+```bash
+# once
+quorum project --create "Ingestion Revamp" --repo yugverma17/ingestion \
+    --members "Priya Raghavan:priya@x.com,Sam Okafor:sam@x.com"
+
+# every meeting
+quorum record --project ingestion-revamp --me "Yug Verma"
+
+# any morning
+quorum status --project ingestion-revamp    # what is open, who owes what
+quorum today  --project ingestion-revamp    # what to chase, with drafted emails
+quorum done "the ingestion spec"            # tell it something is finished
+```
+
+`today` runs the daily sweep: it checks GitHub for delivery, then decides per
+commitment whether to remind, nudge, escalate, flag a blocked dependency, or
+record that something was quietly abandoned. Emails are **drafted to
+`runs/drafts/` and never sent** — automatic sending needs Gmail OAuth, which is
+not wired up.
+
+The ledger is plain JSON on disk. When the agent claims you promised something
+six weeks ago, you can open the file and check without the tool's cooperation.
+
+Your meeting data lives in `data/workspace/` and is gitignored.
+
+### Project memory (retrieval)
+
+Each project keeps a vector index over its own history — commitments, decisions
+and risks — in embedded LanceDB with local ONNX embeddings. It does three jobs
+that were previously done worse or not at all:
+
+| Job | Without retrieval |
+|---|---|
+| Match "I sent that Tuesday" to a commitment | Fuzzy string match; fails on paraphrase — *"the spec doc"*, *"that API thing"* |
+| Pick contradiction candidates | Every prior decision went in the prompt; cost grew linearly with project age |
+| Give the extractor project context | A model reading meeting seven cannot know "the ledger" is a component here |
+
+Indexing is idempotent — re-processing a meeting replaces its entries rather
+than adding a second copy, which would otherwise crowd real results out of the
+top-k.
+
 ## Live meetings
 
 ```bash
