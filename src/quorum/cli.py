@@ -21,6 +21,7 @@ from quorum.config import (
     CACHE_DIR,
     DATA_DIR,
     LLM_CACHE_DIR,
+    RUNS_DIR,
     ensure_dirs,
     get_settings,
     setup_logging,
@@ -317,6 +318,154 @@ def guard(model: bool = typer.Option(False, help="Also use the prompt-guard clas
     console.print(
         "\n[dim]Note: the primary defence is structural - there is no code path from "
         "extracted text to an action. This layer makes attempts visible.[/dim]"
+    )
+
+
+@app.command()
+def record(
+    minutes: float = typer.Option(0.0, help="Stop after N minutes. 0 = until Ctrl+C."),
+    roster: str = typer.Option(
+        "", help='Participants: "Priya:priya@x.com,Sam:sam@x.com". Enables naming.'
+    ),
+    me: str = typer.Option("You", help="Your display name."),
+    my_email: str = typer.Option("", help="Your email."),
+    title: str = typer.Option("Live meeting", help="Meeting title."),
+    devices: bool = typer.Option(False, help="List audio devices and exit."),
+    keep_audio: bool = typer.Option(False, help="Keep the recorded WAV chunks."),
+) -> None:
+    """Record a live meeting from this machine and run the full pipeline.
+
+    Works with Google Meet, Zoom, Teams or anything else that makes sound: it
+    captures the system output (everyone else) and your microphone (you), so
+    there is no bot in the call and no platform API involved.
+
+    Start the meeting, then start this. Tell the other participants they are
+    being recorded - in many places that is a legal requirement, not a courtesy.
+    """
+    import time as _time
+    from datetime import date as _date
+
+    from quorum.agents.embedding import LexicalEmbedder
+    from quorum.agents.extractor import Extractor
+    from quorum.agents.resolver import Resolver
+    from quorum.agents.segmenter import Segmenter
+    from quorum.agents.verifier import GroundingVerifier
+    from quorum.capture.audio import DualRecorder, RecorderConfig
+    from quorum.capture.speakers import RemoteSpeakerAttributor, SpeakerRoster, build_transcript
+    from quorum.capture.transcribe import WhisperTranscriber
+    from quorum.models import Speaker
+
+    setup_logging("WARNING")
+    ensure_dirs()
+
+    if devices:
+        try:
+            found = DualRecorder.devices()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]Could not enumerate devices: {exc}[/red]")
+            raise typer.Exit(1)
+        console.print(f"[bold]Microphone:[/bold] {found['mic']['name']}")
+        if found["loopback"]:
+            console.print(f"[bold]System audio:[/bold] {found['loopback']['name']}")
+        else:
+            console.print("[red]No WASAPI loopback device found[/red] - "
+                          "system audio cannot be captured.")
+        return
+
+    others = []
+    for index, entry in enumerate(p for p in roster.split(",") if p.strip()):
+        name, _, email = entry.partition(":")
+        others.append(
+            Speaker(id=f"spk_r{index}", display_name=name.strip(),
+                    email=email.strip() or None, aliases=[name.strip().split()[0]])
+        )
+    people = SpeakerRoster(
+        you=Speaker(id="spk_you", display_name=me, email=my_email or None,
+                    aliases=["I", "me"]),
+        others=others,
+    )
+
+    console.print("[bold yellow]Recording is about to start.[/bold yellow]")
+    console.print("Tell the other participants they are being recorded.\n")
+
+    config = RecorderConfig(
+        output_dir=(RUNS_DIR / "audio") if keep_audio else None, keep_wav=keep_audio
+    )
+    recorder = DualRecorder(config)
+    try:
+        recorder.start(announced=True)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Could not start recording: {exc}[/red]")
+        raise typer.Exit(1)
+
+    deadline = _time.time() + minutes * 60 if minutes else None
+    console.print("[green]Recording.[/green] Press Ctrl+C to stop.\n")
+    try:
+        while deadline is None or _time.time() < deadline:
+            _time.sleep(1.0)
+            captured = recorder.captured_seconds
+            console.print(
+                f"  captured {captured / 60:.1f} min, "
+                f"{recorder.chunks.qsize()} chunk(s) queued, "
+                f"{recorder.skipped_silent} silent chunk(s) skipped",
+                end="\r",
+            )
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopping...[/yellow]")
+    finally:
+        recorder.stop()
+
+    chunks = recorder.drain()
+    if not chunks:
+        console.print("[red]Nothing recorded.[/red] Was there any audio?")
+        raise typer.Exit(1)
+
+    console.print(f"\n{len(chunks)} chunk(s) to transcribe "
+                  f"({recorder.skipped_silent} silent chunk(s) never uploaded)")
+
+    transcriber = WhisperTranscriber()
+    with console.status("Transcribing..."):
+        segments = transcriber.transcribe_all(chunks)
+    console.print(f"Transcribed: {transcriber.stats.segments} segment(s), "
+                  f"{transcriber.stats.audio_seconds:.0f}s of audio "
+                  f"({transcriber.stats.daily_budget_used:.1%} of the daily free budget)")
+
+    if not segments:
+        console.print("[red]No speech recognised.[/red]")
+        raise typer.Exit(1)
+
+    transcript = build_transcript(segments, people, meeting_date=_date.today(), title=title)
+    if len(people.others) >= 1:
+        with console.status("Attributing speakers..."):
+            RemoteSpeakerAttributor().attribute(transcript, people)
+
+    console.print(f"\n[bold]Transcript:[/bold] {len(transcript.utterances)} utterances\n")
+    console.print(transcript.as_dialogue(0, min(8, len(transcript.utterances))))
+    if len(transcript.utterances) > 8:
+        console.print(f"[dim]... and {len(transcript.utterances) - 8} more[/dim]")
+
+    with console.status("Extracting commitments..."):
+        segmented = Segmenter(embedder=LexicalEmbedder()).segment(transcript)
+        extracted = Extractor().extract(transcript, segmented)
+        commitments, report = GroundingVerifier().verify(extracted.commitments, transcript)
+        Resolver().resolve(commitments, transcript)
+
+    table = Table(title="\nCommitments found", header_style="bold")
+    table.add_column("Owner")
+    table.add_column("Commitment", overflow="fold")
+    table.add_column("Due")
+    table.add_column("Strength")
+    for commitment in commitments:
+        table.add_row(
+            commitment.assignee.display_name or f"[dim]{commitment.assignee.raw_mention}[/dim]",
+            commitment.description,
+            commitment.deadline.resolved.isoformat() if commitment.deadline.resolved else "-",
+            commitment.strength.value,
+        )
+    console.print(table)
+    console.print(
+        f"[dim]{report.rejected} item(s) rejected as ungrounded. "
+        f"Nothing was sent - the approval gate is enabled.[/dim]"
     )
 
 

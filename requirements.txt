@@ -20,6 +20,12 @@ langchain-core>=0.3
 fastembed>=0.4
 lancedb>=0.17
 
+# --- Live capture (Windows) ---
+# PortAudio fork exposing WASAPI loopback, which is how system audio (everyone
+# else in the call) gets captured without a bot joining the meeting. Windows
+# only; the rest of the project runs fine without it.
+PyAudioWPatch>=0.2.12; sys_platform == "win32"
+
 # --- Utilities ---
 rapidfuzz>=3.10
 typer>=0.15

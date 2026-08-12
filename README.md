@@ -8,6 +8,7 @@ meetings — verifying against external evidence whether the work was really don
 and chasing, escalating or closing each item on its own.
 
 ```bash
+python -m quorum.cli record      # sit on a live Meet/Zoom call and capture it
 python -m quorum.cli demo        # watch it run an 8-week project
 python -m quorum.cli evaluate    # reproduce the numbers below
 python -m quorum.cli guard       # score the injection defence
@@ -137,6 +138,12 @@ silently corrupted results:
 ## Architecture
 
 ```
+live meeting audio ──► mic + system loopback ──► Whisper ──┐
+uploaded transcript ───────────────────────────────────────┤
+AMI corpus ────────────────────────────────────────────────┤
+synthetic benchmark ───────────────────────────────────────┘
+    │
+    ▼
 transcript
     │
     ├─ Segmenter ......... topic-coherent chunks (keeps prompts under the TPM ceiling)
@@ -236,6 +243,48 @@ Built on **free-tier APIs only**, on a laptop with **7.6 GB RAM and no GPU**:
   for confidence intervals.
 - **Gmail and Calendar transports are dry-run.** The approval gate, digest
   building and evidence interface are real and tested; OAuth is not wired.
+
+## Live meetings
+
+```bash
+python -m quorum.cli record --devices          # check your audio setup
+python -m quorum.cli record --minutes 30 \
+    --me "Yug Verma" --roster "Priya:priya@x.com,Sam:sam@x.com"
+```
+
+Start your Meet/Zoom/Teams call, then start this. It captures the **system audio
+output** (everyone else) and your **microphone** (you) as two separate streams.
+
+No bot joins the call. No platform API is involved. It works identically across
+Meet, Zoom, Teams and a phone on speaker, because it records the machine rather
+than the meeting.
+
+That was a deliberate choice over the alternatives:
+
+| Approach | Why not |
+|---|---|
+| Google Meet Media API | Only works if *every* participant is enrolled in its developer preview |
+| Zoom RTMS | Requires account credits |
+| Headless-browser bot | Fragile, ToS-grey, and wants more RAM than this laptop has spare |
+
+**The two-channel split gives speaker separation for free.** Microphone is you,
+loopback is everyone else — exactly, with no diarisation model, which matters on
+a machine that cannot host one.
+
+**What it does not solve:** the remote participants share one channel. With one
+other person that is unambiguous and costs nothing. With several, a roster-based
+attribution pass uses conversational cues, and **abstains rather than guessing** —
+an unattributed commitment gets surfaced to a human, whereas a wrongly attributed
+one silently nags the wrong colleague. This is the weakest link in the live path
+and is stated as such.
+
+**Quota:** Groq's free Whisper tier gives 28,800 audio-seconds/day — eight hours
+of meetings. Silent chunks are detected and never uploaded, which is the largest
+saving available since most of any meeting is one side not talking.
+
+**Consent:** the recorder announces itself and refuses to start with
+`announced=False`. Recording other people has legal requirements that vary by
+jurisdiction; two-party-consent rules are common.
 
 ## Running on the real corpus (AMI)
 
