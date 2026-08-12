@@ -228,12 +228,48 @@ Built on **free-tier APIs only**, on a laptop with **7.6 GB RAM and no GPU**:
   commitment never extracted cannot later be chased. Improving it means improving
   extraction, not the planner.
 - **The synthetic benchmark is templated.** Real meetings have crosstalk,
-  half-sentences and ASR errors. AMI ingestion is not yet wired up, so the
-  extraction numbers should be read as an upper bound.
+  half-sentences and ASR errors, so these extraction numbers are an upper bound.
+  The AMI parser and scorer are built and tested (against synthetic NXT-format
+  XML), but the corpus needs a licence accepted by hand and has not yet been run —
+  so **no real-transcript number is claimed here yet**. See below.
 - **Small n.** 3 projects / 18 meetings. Enough to direct development, not enough
   for confidence intervals.
 - **Gmail and Calendar transports are dry-run.** The approval gate, digest
   building and evidence interface are real and tested; OAuth is not wired.
+
+## Running on the real corpus (AMI)
+
+The AMI Meeting Corpus is 100 hours of real meetings annotated with
+`ABSTRACT` / `DECISIONS` / `PROBLEMS` / `ACTIONS` sections. The `ACTIONS`
+sections are ground truth for action-item extraction.
+
+It cannot be bundled — the licence must be accepted by hand:
+
+1. Open [groups.inf.ed.ac.uk/ami/download](https://groups.inf.ed.ac.uk/ami/download/)
+2. Tick **manual annotations**. You do *not* need audio or video — those are
+   hundreds of gigabytes and nothing here uses them.
+3. Accept the licence, download `ami_public_manual_1.6.2.zip`
+4. Unzip into `data/ami/` (any nesting; the parser searches for `words/`)
+
+```bash
+python -m quorum.cli ami --limit 5
+```
+
+The parser handles what actually breaks in NXT format: per-speaker word files
+merged into one time-ordered transcript, segment pointers that reference words by
+**range** (a segment names only its first and last word — naive parsing silently
+drops everything between), and punctuation stored as separate tokens.
+
+**Two caveats that must travel with any AMI number.** Its `ACTIONS` are
+*abstractive* — an annotator's after-the-fact sentence that appears nowhere in
+the transcript — so alignment is fuzzy, and these scores are **not comparable**
+to the synthetic benchmark's exact-span scores. And inter-annotator agreement on
+this task is around **κ = 0.36**: humans barely agree with each other on what
+counts as an action item, so perfect agreement with one annotator is not the
+target and would suggest overfitting to one person's habits.
+
+*(The HuggingFace mirror of AMI is unusable for this: it collapses everything
+into a single `summary` field with no separate `ACTIONS` section.)*
 
 ## Quickstart
 
@@ -255,7 +291,8 @@ python -m quorum.cli evaluate --out runs/report.json
 python -m quorum.cli guard
 python -m quorum.cli models           # registry and live-verified limits
 python -m quorum.cli quota            # today's remaining budget
-pytest -m "not live"                  # 238 tests
+python -m quorum.cli ami --limit 5    # real AMI transcripts (needs the corpus)
+pytest -m "not live"                  # 270 tests
 ```
 
 ## Licence

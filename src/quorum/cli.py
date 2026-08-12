@@ -321,6 +321,90 @@ def guard(model: bool = typer.Option(False, help="Also use the prompt-guard clas
 
 
 @app.command()
+def ami(
+    path: str = typer.Option("data/ami", help="Where the corpus was unpacked."),
+    limit: int = typer.Option(5, help="Meetings to evaluate. Each costs quota."),
+    threshold: float = typer.Option(55.0, help="Fuzzy match threshold."),
+    out: str = typer.Option("", help="Write the report to this JSON path."),
+) -> None:
+    """Evaluate extraction against the real AMI corpus.
+
+    The corpus is not bundled - it needs a licence accepted by hand:
+
+      1. Open https://groups.inf.ed.ac.uk/ami/download/
+      2. Tick "manual annotations" (you do NOT need the audio or video -
+         those are hundreds of gigabytes and nothing here uses them).
+      3. Accept the licence and download ami_public_manual_1.6.2.zip
+      4. Unzip it into data/ami/ - any nesting is fine, it will be found.
+
+    Then: python -m quorum.cli ami --limit 5
+    """
+    import json
+
+    from quorum.agents.embedding import LexicalEmbedder
+    from quorum.agents.extractor import Extractor
+    from quorum.agents.resolver import Resolver
+    from quorum.agents.segmenter import Segmenter
+    from quorum.agents.verifier import GroundingVerifier
+    from quorum.data.ami import AmiCorpus
+    from quorum.eval.ami_eval import score_meeting, summarise
+
+    setup_logging("WARNING")
+    ensure_dirs()
+
+    try:
+        corpus = AmiCorpus(Path(path))
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]\n")
+        console.print("[bold]To get the corpus:[/bold]")
+        console.print("  1. https://groups.inf.ed.ac.uk/ami/download/")
+        console.print("  2. Tick [bold]manual annotations[/bold] "
+                      "[dim](not audio/video - those are huge and unused)[/dim]")
+        console.print("  3. Accept the licence, download ami_public_manual_1.6.2.zip")
+        console.print(f"  4. Unzip into [bold]{path}/[/bold]")
+        raise typer.Exit(1)
+
+    console.print(f"Corpus at [dim]{corpus.root}[/dim]")
+    meetings = corpus.load_all(limit=limit)
+    if not meetings:
+        console.print("[red]No meetings with ACTIONS annotations found.[/red] "
+                      "Check that the abstractive/ directory was unpacked.")
+        raise typer.Exit(1)
+
+    segmenter = Segmenter(embedder=LexicalEmbedder())
+    extractor, resolver, verifier = Extractor(), Resolver(), GroundingVerifier()
+    results = []
+
+    for meeting in meetings:
+        with console.status(f"{meeting.meeting_id}..."):
+            segments = segmenter.segment(meeting.transcript)
+            extracted = extractor.extract(meeting.transcript, segments)
+            commitments, _ = verifier.verify(extracted.commitments, meeting.transcript)
+            resolver.resolve(commitments, meeting.transcript)
+            result = score_meeting(meeting, commitments, threshold)
+        results.append(result)
+        console.print(
+            f"  {meeting.meeting_id}: {len(meeting.transcript.utterances)} utterances, "
+            f"{len(meeting.actions)} annotated actions, "
+            f"P={result.scores.precision:.2f} R={result.scores.recall:.2f}"
+        )
+
+    summary = summarise(results)
+    table = Table(title="AMI extraction (real transcripts)", header_style="bold")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    for label, key in [("Precision", "precision"), ("Recall", "recall"), ("F1", "f1")]:
+        table.add_row(label, f"{summary['commitments'][key]:.3f}")
+    table.add_row("Meetings", str(summary["meetings"]))
+    console.print(table)
+    console.print(f"\n[yellow]Read with care:[/yellow] {summary['note']}")
+
+    if out:
+        Path(out).write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        console.print(f"[dim]Written to {out}[/dim]")
+
+
+@app.command()
 def demo(seed: int = 0, weeks: int = 6) -> None:
     """Run one synthetic project end to end and show what the agent would do."""
     from datetime import timedelta
