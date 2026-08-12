@@ -219,6 +219,10 @@ class Assignee(BaseModel):
     speaker_id: str | None = None
     display_name: str | None = None
     email: str | None = None
+    github_login: str | None = None
+    """Carried through so the reality-verification layer can search that
+    person's pull requests without re-resolving the identity."""
+
     confidence: float = 0.0
     unresolved_reason: str | None = None
 

@@ -252,6 +252,7 @@ class Resolver:
         commitment.assignee.speaker_id = speaker.id
         commitment.assignee.display_name = speaker.display_name
         commitment.assignee.email = speaker.email
+        commitment.assignee.github_login = speaker.github_login
         commitment.assignee.confidence = confidence
         commitment.assignee.unresolved_reason = None
         if deterministic:
