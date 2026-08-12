@@ -37,6 +37,22 @@ log = logging.getLogger(__name__)
 
 FIRST_PERSON = {"i", "i'll", "ill", "me", "my", "myself", "i will", "i can", "i've", "i am"}
 SECOND_PERSON = {"you", "your", "you'll", "youll", "u"}
+
+# Phrases that mark the speaker taking work on themselves.
+SELF_MARKERS = re.compile(
+    r"\b(i'?ll|i will|i can|i'?m going to|i am going to|i'?ve got|let me|i'?d be happy|"
+    r"leave (it|that) with me|i'?ll take)\b",
+    re.IGNORECASE,
+)
+
+# Phrases that mark work being asked *of someone else*. An imperative request is
+# directed outward by definition, so the speaker can never be its owner - and
+# assigning it to them was exactly the bug this guards against.
+REQUEST_MARKERS = re.compile(
+    r"\b(please|can you|could you|would you|will you|send me|get me|share (it|that) with me|"
+    r"let me know|i need you to|make sure you)\b",
+    re.IGNORECASE,
+)
 COLLECTIVE = {
     "we", "us", "our", "the team", "team", "everyone", "everybody", "all of us",
     "someone", "somebody", "anyone", "anybody", "no one", "whoever", "people",
@@ -134,26 +150,44 @@ class Resolver:
     ) -> None:
         mention = _norm(commitment.assignee.raw_mention)
         anchor = self._anchor_utterance(commitment, transcript)
+        quote = commitment.evidence[0].quote if commitment.evidence else ""
+        is_request = bool(REQUEST_MARKERS.search(quote))
+
+        # 0. A named person always wins, whatever the phrasing around them.
+        if mention and mention not in FIRST_PERSON and mention not in SECOND_PERSON:
+            named = transcript.resolve_mention(mention)
+            if named:
+                self._assign(commitment, named, 0.9, stats, deterministic=True)
+                return
 
         # 1. First person: the speaker of the cited line owns it.
-        if mention in FIRST_PERSON or (not mention and anchor is not None):
-            if anchor is not None:
-                speaker = transcript.speaker(anchor.speaker_id)
-                if speaker:
-                    self._assign(commitment, speaker, 0.95, stats, deterministic=True)
-                    return
+        #    A bare mention is only read as first-person when the words actually
+        #    support it. Defaulting to the speaker used to assign "please send me
+        #    the offer letter" to the person requesting it.
+        looks_self_owned = mention in FIRST_PERSON or (
+            not mention and not is_request and SELF_MARKERS.search(quote)
+        )
+        if looks_self_owned and anchor is not None:
+            speaker = transcript.speaker(anchor.speaker_id)
+            if speaker:
+                self._assign(commitment, speaker, 0.95, stats, deterministic=True)
+                return
 
         # 2. A collective is not an owner.
         if mention in COLLECTIVE:
             self._unresolved(commitment, stats, "collective or unowned mention")
             return
 
-        # 3. Named person in the roster.
-        if mention:
-            speaker = transcript.resolve_mention(mention)
-            if speaker:
-                self._assign(commitment, speaker, 0.9, stats, deterministic=True)
-                return
+        # 3. A request is aimed at someone else - resolve the addressee, never
+        #    the person asking. This covers a missing mention and a junk one
+        #    ("Please"), both of which the extractor produces in practice.
+        if is_request and anchor is not None:
+            addressed = self._addressee(anchor, transcript)
+            if addressed:
+                self._assign(commitment, addressed, 0.7, stats, deterministic=True)
+            else:
+                self._unresolved(commitment, stats, "request with no identifiable addressee")
+            return
 
         # 4. Second person: who was being addressed?
         if mention in SECOND_PERSON and anchor is not None:
@@ -161,11 +195,17 @@ class Resolver:
             if addressed:
                 self._assign(commitment, addressed, 0.75, stats, deterministic=True)
                 return
+            # "Please send me the offer letter" means someone else sends it.
+            # With nobody else identifiable the honest answer is unresolved -
+            # falling through to a model here produced the speaker themselves,
+            # which is the one answer that cannot be right.
+            self._unresolved(commitment, stats, "addressee not identifiable")
+            return
 
         # 5. Ambiguous - ask a model, but only if there is something to ask about.
         if self.config.use_llm_fallback and mention:
             speaker = self._ask_model(commitment, transcript, stats)
-            if speaker:
+            if speaker and not self._is_self_reference(mention, speaker, anchor):
                 self._assign(commitment, speaker, 0.65, stats, deterministic=False)
                 return
 
@@ -179,6 +219,20 @@ class Resolver:
             if utterance is not None:
                 return utterance
         return None
+
+    @staticmethod
+    def _is_self_reference(mention: str, speaker: Speaker, anchor) -> bool:
+        """Reject a second-person mention resolving to the person speaking.
+
+        "you" cannot mean the speaker. A model asked to guess will sometimes
+        return them anyway - and an owner that is definitionally wrong is worse
+        than no owner, because it looks resolved and nobody re-checks it.
+        """
+        return (
+            mention in SECOND_PERSON
+            and anchor is not None
+            and speaker.id == anchor.speaker_id
+        )
 
     def _addressee(self, anchor, transcript: Transcript) -> Speaker | None:
         """Who "you" refers to in a line like "Sam, can you review it?".

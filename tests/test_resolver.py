@@ -17,12 +17,17 @@ class FakeRouter:
         return self.guesses.pop(0), LLMResponse(text="{}", model="fake", provider="fake")
 
 
-def make(mention: str | None, utterance_id: str, deadline: str | None = None) -> Commitment:
+def make(
+    mention: str | None,
+    utterance_id: str,
+    deadline: str | None = None,
+    quote: str = "some verbatim quote here",
+) -> Commitment:
     return Commitment(
         description="do the thing",
         assignee=Assignee(raw_mention=mention),
         deadline=Deadline(raw_text=deadline),
-        evidence=[Evidence(utterance_id=utterance_id, quote="some verbatim quote here")],
+        evidence=[Evidence(utterance_id=utterance_id, quote=quote)],
     )
 
 
@@ -46,8 +51,52 @@ def test_first_person_resolves_to_the_speaker_of_the_cited_line(transcript):
     assert stats.llm_calls == 0
 
 
-def test_missing_mention_falls_back_to_the_speaker(transcript):
-    commitment = make(None, "utt_3")
+def test_missing_mention_with_first_person_evidence_uses_the_speaker(transcript):
+    """The extractor often omits the mention on "I'll do X" phrasing. The words
+    themselves carry the ownership, so the speaker is the right answer."""
+    commitment = make(None, "utt_3", quote="Sure, I'll take a look over the weekend.")
+    offline().resolve([commitment], transcript)
+    assert commitment.assignee.display_name == "Sam Okafor"
+
+
+def test_missing_mention_without_evidence_of_ownership_stays_unresolved(transcript):
+    """Regression from a live recording. Defaulting a bare mention to the
+    speaker assigned "please send me the offer letter" to the person *asking*
+    for it - an owner that is definitionally wrong, and one that looks resolved
+    so nobody re-checks it."""
+    commitment = make(None, "utt_3", quote="some verbatim quote here")
+    stats = offline().resolve([commitment], transcript)
+
+    assert commitment.assignee.speaker_id is None
+    assert stats.assignee_unresolved == 1
+
+
+def test_a_request_is_never_owned_by_the_person_asking(transcript):
+    """"Please send me the offer letter" is work for someone else, by definition."""
+    commitment = make(
+        None, "utt_0", quote="Please send me the offer letter on email by today."
+    )
+    offline().resolve([commitment], transcript)
+
+    assert commitment.assignee.speaker_id != "spk_priya", "the asker cannot be the owner"
+    assert commitment.assignee.display_name == "Yug Verma", "resolved to who answered"
+
+
+def test_junk_mention_on_a_request_still_avoids_the_speaker(transcript):
+    """The extractor sometimes returns "Please" as the assignee mention. That is
+    not a person, and it must not fall through to the speaker."""
+    commitment = make(
+        "Please", "utt_0", quote="Please send me the offer letter on email by today."
+    )
+    offline().resolve([commitment], transcript)
+    assert commitment.assignee.speaker_id != "spk_priya"
+
+
+def test_a_named_person_wins_over_request_phrasing(transcript):
+    """"Sam, could you please send it?" - the name is unambiguous."""
+    commitment = make(
+        "Sam", "utt_2", quote="Great. Sam, can you review it once it lands?"
+    )
     offline().resolve([commitment], transcript)
     assert commitment.assignee.display_name == "Sam Okafor"
 

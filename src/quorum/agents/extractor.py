@@ -138,6 +138,20 @@ A question ("can you review it?") is not a commitment. The *answer* to it
 Do not record a commitment for work that was discussed but never accepted by
 anyone.
 
+ONE LINE CAN CONTAIN SEVERAL COMMITMENTS - extract every one
+
+People routinely stack obligations into a single breath, often with different
+owners. Each is a separate item.
+
+  "I'll join on Monday. Please send me the offer letter by today."
+      -> TWO commitments: the speaker joins Monday; SOMEONE ELSE sends the
+         letter today.
+  "I'll do the migration and Sam will review it."
+      -> TWO commitments with two different owners.
+
+Never merge them, and never return only the first one you notice. Re-read each
+line and ask whether a second obligation is hiding in it.
+
 STATUS UPDATES - news about work promised in an EARLIER meeting
 
 These are not new commitments. Put them in status_updates, not commitments:

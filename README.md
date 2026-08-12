@@ -221,9 +221,9 @@ Built on **free-tier APIs only**, on a laptop with **7.6 GB RAM and no GPU**:
 
 ## Honest limitations
 
-- **The numbers move between runs.** Three runs of the identical command gave F1
-  of 0.901 / 0.914 / 0.919. The router fails over between models under quota
-  pressure, so different segments get extracted by different models and the
+- **The numbers move between runs.** Repeated runs of the identical command gave
+  F1 of 0.901 / 0.914 / 0.919 / 0.941. The router fails over between models under
+  quota pressure, so different segments get extracted by different models and the
   result shifts by a point or two. Quote these as a range, not a constant. A
   reproducible harness would pin one model per stage and disable failover; the
   `degraded` flag on every response already records when a fallback happened.
