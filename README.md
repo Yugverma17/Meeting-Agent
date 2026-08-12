@@ -50,14 +50,14 @@ Reproduce with `python -m quorum.cli evaluate`.
 
 | Metric | Score |
 |---|---|
-| Commitment precision | 0.914 |
-| Commitment recall | 0.889 |
-| **F1** | **0.901** |
-| Assignee resolution accuracy | 0.938 |
-| Deadline normalisation accuracy | 0.812 |
+| Commitment precision | 0.895 |
+| Commitment recall | 0.944 |
+| **F1** | **0.919** |
+| Assignee resolution accuracy | 0.941 |
+| Deadline normalisation accuracy | 0.853 |
 | Commitment-strength accuracy | 1.000 |
 | **Musing promotion rate** | **0.000** |
-| Hallucination rate | 0.021 |
+| Hallucination rate | 0.000 |
 
 **Musing promotion rate is the one to look at.** Across 15 idle remarks —
 *"we should probably think about rate limiting at some point"*, *"someone ought
@@ -76,9 +76,16 @@ outcome of every commitment by construction.
 |---|---|---|
 | Dropped-commitment recall | 0.625 | 16 |
 | **False-nag rate** (lower is better) | **0.067** | 15 |
-| Silent-delivery recall | 0.750 | 4 |
+| Silent-delivery recall | 1.000 | 4 |
 | Contradiction recall | 0.833 | 6 |
-| Blocked-slip propagation | 0.600 | 5 |
+| Contradiction precision | 0.714 | 6 |
+| Blocked-slip propagation | 0.800 | 5 |
+
+Contradiction is reported both ways deliberately. Recall alone can be driven to
+1.0 by flagging every pair of decisions, so precision is what makes the number
+mean anything — and an early version of this metric returned a **recall of
+1.167**, which is arithmetically impossible and was the visible symptom of
+counting raw detections instead of correct ones.
 
 **Silent delivery** is the case that justifies the whole external-evidence
 layer: work that was finished and then never mentioned again. Conversation alone
@@ -89,9 +96,9 @@ delivered a week ago.
 
 | | |
 |---|---|
-| LLM calls | 45 |
-| Tokens | 73,931 (~4,100/meeting) |
-| Wall time | 15.9s |
+| LLM calls | 48 |
+| Tokens | 71,502 (~4,000/meeting) |
+| Wall time | 8.8s |
 | **Cost** | **$0.00** |
 
 ### Adversarial
@@ -207,6 +214,12 @@ Built on **free-tier APIs only**, on a laptop with **7.6 GB RAM and no GPU**:
 
 ## Honest limitations
 
+- **The numbers move between runs.** Three runs of the identical command gave F1
+  of 0.901 / 0.914 / 0.919. The router fails over between models under quota
+  pressure, so different segments get extracted by different models and the
+  result shifts by a point or two. Quote these as a range, not a constant. A
+  reproducible harness would pin one model per stage and disable failover; the
+  `degraded` flag on every response already records when a fallback happened.
 - **The injection suite was tuned on itself.** 12/12 with 0 false positives is
   partly overfit; a real assessment needs held-out attacks written by someone
   else. The structural defence — no code path from extracted text to an action —

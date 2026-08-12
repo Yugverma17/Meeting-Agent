@@ -270,6 +270,7 @@ def evaluate(
         ("False-nag rate (lower better)", "false_nag_rate", "nag_targets_total"),
         ("Silent-delivery recall", "silent_delivery_recall", "silent_deliveries_total"),
         ("Contradiction recall", "contradiction_recall", "contradictions_total"),
+        ("Contradiction precision", "contradiction_precision", "contradictions_total"),
         ("Blocked propagation", "blocked_propagation_recall", "blocked_total"),
     ]:
         tracking.add_row(label, f"{summary['tracking'][key]:.3f}", str(counts[count_key]))

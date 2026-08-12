@@ -266,9 +266,44 @@ class EvaluationHarness:
                 if action is not None and action.action is ActionType.PROPAGATE_SLIP:
                     result.tracking.blocked_propagated += 1
 
-        reversed_decisions = [d for d in manifest.decisions if d.reversed_by]
-        result.tracking.contradictions_total += len(reversed_decisions)
-        result.tracking.contradictions_caught += len(ledger.contradictions())
+        self._score_contradictions(ledger, manifest, result)
+
+    @staticmethod
+    def _score_contradictions(ledger: Ledger, manifest: ProjectManifest, result: ProjectResult):
+        """Score detected reversals against the true ones.
+
+        Counting raw detections here produced a recall of 1.167 - impossible,
+        and a giveaway that false positives were landing in the numerator. A
+        detected pair only counts if it names the same two decisions the
+        manifest says reverse each other, and each true pair can be claimed
+        once. Everything else is a false positive, reported separately: telling
+        a team its plan changed when it did not is its own kind of failure.
+        """
+        by_id = {d.id: d for d in manifest.decisions}
+        truth_pairs = [
+            (d.statement, by_id[d.reversed_by].statement)
+            for d in manifest.decisions
+            if d.reversed_by and d.reversed_by in by_id
+        ]
+        result.tracking.contradictions_total += len(truth_pairs)
+
+        claimed: set[int] = set()
+        for earlier, later in ledger.contradictions():
+            match = None
+            for index, (true_earlier, true_later) in enumerate(truth_pairs):
+                if index in claimed:
+                    continue
+                if (
+                    fuzz.token_set_ratio(earlier.statement.lower(), true_earlier.lower()) >= 70
+                    and fuzz.token_set_ratio(later.statement.lower(), true_later.lower()) >= 70
+                ):
+                    match = index
+                    break
+            if match is None:
+                result.tracking.contradiction_false_positives += 1
+            else:
+                claimed.add(match)
+                result.tracking.contradictions_caught += 1
 
     @staticmethod
     def _action_for(truth, by_commitment, ledger: Ledger, truth_to_prediction):
@@ -330,6 +365,7 @@ def aggregate(results: list[ProjectResult]) -> dict:
         for attribute in (
             "dropped_caught", "dropped_total", "false_nags", "nag_targets_total",
             "contradictions_caught", "contradictions_total",
+            "contradiction_false_positives",
             "silent_deliveries_verified", "silent_deliveries_total",
             "blocked_propagated", "blocked_total",
         ):

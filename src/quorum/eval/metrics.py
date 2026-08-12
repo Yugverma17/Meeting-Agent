@@ -130,6 +130,9 @@ class TrackingScores:
 
     contradictions_caught: int = 0
     contradictions_total: int = 0
+    contradiction_false_positives: int = 0
+    """Reversals reported that were not real. Tracked separately because
+    recall alone can be gamed by flagging every pair of decisions."""
 
     silent_deliveries_verified: int = 0
     silent_deliveries_total: int = 0
@@ -156,6 +159,11 @@ class TrackingScores:
         return self._ratio(self.contradictions_caught, self.contradictions_total)
 
     @property
+    def contradiction_precision(self) -> float:
+        detected = self.contradictions_caught + self.contradiction_false_positives
+        return self._ratio(self.contradictions_caught, detected)
+
+    @property
     def silent_delivery_recall(self) -> float:
         """Delivered but never discussed - provable only from external evidence."""
         return self._ratio(self.silent_deliveries_verified, self.silent_deliveries_total)
@@ -169,6 +177,7 @@ class TrackingScores:
             "dropped_recall": round(self.dropped_recall, 4),
             "false_nag_rate": round(self.false_nag_rate, 4),
             "contradiction_recall": round(self.contradiction_recall, 4),
+            "contradiction_precision": round(self.contradiction_precision, 4),
             "silent_delivery_recall": round(self.silent_delivery_recall, 4),
             "blocked_propagation_recall": round(self.blocked_propagation_recall, 4),
             "counts": {
