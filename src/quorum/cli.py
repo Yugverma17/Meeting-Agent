@@ -351,6 +351,7 @@ def record(
     from quorum.agents.segmenter import Segmenter
     from quorum.agents.verifier import GroundingVerifier
     from quorum.capture.audio import DualRecorder, RecorderConfig
+    from quorum.capture.echo import suppress_echo
     from quorum.capture.speakers import RemoteSpeakerAttributor, SpeakerRoster, build_transcript
     from quorum.capture.transcribe import WhisperTranscriber
     from quorum.models import Speaker
@@ -386,7 +387,11 @@ def record(
     )
 
     console.print("[bold yellow]Recording is about to start.[/bold yellow]")
-    console.print("Tell the other participants they are being recorded.\n")
+    console.print("Tell the other participants they are being recorded.")
+    console.print(
+        "[dim]Wear headphones if you can - otherwise your mic hears your own "
+        "speakers and the other side's words can be attributed to you.[/dim]\n"
+    )
 
     config = RecorderConfig(
         output_dir=(RUNS_DIR / "audio") if keep_audio else None, keep_wav=keep_audio
@@ -433,6 +438,18 @@ def record(
     if not segments:
         console.print("[red]No speech recognised.[/red]")
         raise typer.Exit(1)
+
+    segments, echo = suppress_echo(segments)
+    if echo.removed:
+        console.print(
+            f"[yellow]Removed {echo.removed} echoed segment(s)[/yellow] - your microphone "
+            f"picked up your own speakers ({echo.echo_rate:.0%} of your speech)."
+        )
+        if echo.likely_no_headphones:
+            console.print(
+                "[bold yellow]Use headphones.[/bold yellow] Without them the remote audio "
+                "loops back through your mic and can be misattributed to you."
+            )
 
     transcript = build_transcript(segments, people, meeting_date=_date.today(), title=title)
     if len(people.others) >= 1:

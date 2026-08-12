@@ -8,6 +8,7 @@ from quorum.capture.audio import (
     is_silent,
     resample_to_16k,
 )
+from quorum.capture.echo import EchoReport, suppress_echo
 from quorum.capture.transcribe import WhisperTranscriber
 
 __all__ = [
@@ -15,6 +16,8 @@ __all__ = [
     "RecorderConfig",
     "AudioChunk",
     "WhisperTranscriber",
+    "suppress_echo",
+    "EchoReport",
     "downmix_to_mono",
     "resample_to_16k",
     "is_silent",

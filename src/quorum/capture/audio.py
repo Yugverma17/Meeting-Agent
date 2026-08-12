@@ -244,7 +244,7 @@ class DualRecorder:
 
         buffer: list[np.ndarray] = []
         collected = 0
-        chunk_start = 0.0
+        emitted_frames = 0
 
         try:
             while not self._stop.is_set():
@@ -259,12 +259,17 @@ class DualRecorder:
                 collected += len(block) // max(channels, 1)
 
                 if collected >= frames_per_chunk:
-                    self._emit(channel, buffer, rate, channels, chunk_start)
-                    chunk_start += cfg.chunk_seconds
+                    # Start time comes from frames actually captured, not from an
+                    # assumed chunk length. A dropped or short read would
+                    # otherwise shift this channel's whole timeline against the
+                    # other one, and the two must stay comparable for echo
+                    # suppression and interleaving to work.
+                    self._emit(channel, buffer, rate, channels, emitted_frames / rate)
+                    emitted_frames += collected
                     buffer, collected = [], 0
 
             if buffer:
-                self._emit(channel, buffer, rate, channels, chunk_start)
+                self._emit(channel, buffer, rate, channels, emitted_frames / rate)
         finally:
             stream.stop_stream()
             stream.close()

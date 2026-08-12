@@ -278,6 +278,29 @@ an unattributed commitment gets surfaced to a human, whereas a wrongly attribute
 one silently nags the wrong colleague. This is the weakest link in the live path
 and is stated as such.
 
+**Wear headphones.** Without them the remote audio leaves your speakers, crosses
+a few centimetres of air, and re-enters your microphone — so the same words land
+on *both* channels and the echoed copy gets attributed to you. This showed up on
+the very first real recording:
+
+```
+[1] Remote participant (00:00): you have TOC, table of content, right?...
+[4] Yug Verma         (00:18): You have TOC table of content...
+```
+
+Left unhandled it is worse than untidy: the resolver maps first-person speech to
+whoever spoke it, so an echoed *"I'll have that by Friday"* from someone else
+becomes a commitment owned by you.
+
+Echo is now suppressed on the transcribed text rather than the waveform. Proper
+acoustic echo cancellation means adaptive filtering against a reference signal
+and is sensitive to clock drift between two independently-started streams;
+comparing what was *said* survives drift, volume differences and timestamp
+jitter. Suppression is one-directional — speakers cannot hear the microphone —
+and short utterances are never removed, because deleting a genuine "yeah" costs
+more than keeping a duplicated one. A high echo rate is reported back as a
+"use headphones" warning.
+
 **Quota:** Groq's free Whisper tier gives 28,800 audio-seconds/day — eight hours
 of meetings. Silent chunks are detected and never uploaded, which is the largest
 saving available since most of any meeting is one side not talking.
