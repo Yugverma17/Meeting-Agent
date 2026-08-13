@@ -44,6 +44,20 @@ MERGE_GAP_S = 1.2
 """Consecutive segments on one channel closer than this are one utterance.
 Whisper splits on breath pauses, which are not turn boundaries."""
 
+MAX_MERGED_S = 25.0
+"""Ceiling on how long a merged utterance may grow.
+
+Without it, merging runs away. Recording chunks are contiguous - chunk N ends at
+30.0s and chunk N+1 begins at 30.0s, a gap of zero - so an uninterrupted speaker
+merges across every chunk boundary in the recording. A 19-minute lecture
+collapsed into a single utterance, which the segmenter then could not split
+(nothing divides one utterance), so the entire talk went to the model in one
+call and came back summarised rather than extracted: two key points for
+nineteen minutes.
+
+Nobody speaks in 19-minute turns. Capping the merge restores real utterance
+boundaries and lets segmentation and extraction work as intended."""
+
 
 class Attribution(BaseModel):
     utterance_index: int
@@ -77,8 +91,12 @@ class SpeakerRoster:
         )
 
 
-def merge_segments(segments: list[TranscriptSegment], gap: float = MERGE_GAP_S) -> list[TranscriptSegment]:
-    """Join same-channel segments separated by only a breath."""
+def merge_segments(
+    segments: list[TranscriptSegment],
+    gap: float = MERGE_GAP_S,
+    max_merged_s: float = MAX_MERGED_S,
+) -> list[TranscriptSegment]:
+    """Join same-channel segments separated by only a breath, up to a ceiling."""
     if not segments:
         return []
 
@@ -86,7 +104,10 @@ def merge_segments(segments: list[TranscriptSegment], gap: float = MERGE_GAP_S) 
     merged = [ordered[0]]
     for segment in ordered[1:]:
         previous = merged[-1]
-        if segment.channel == previous.channel and segment.start_s - previous.end_s <= gap:
+        close_enough = segment.start_s - previous.end_s <= gap
+        would_stay_short = (segment.end_s - previous.start_s) <= max_merged_s
+
+        if segment.channel == previous.channel and close_enough and would_stay_short:
             merged[-1] = TranscriptSegment(
                 channel=previous.channel, start_s=previous.start_s, end_s=segment.end_s,
                 text=f"{previous.text} {segment.text}".strip(),

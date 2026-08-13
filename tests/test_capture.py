@@ -175,6 +175,45 @@ def test_merge_of_nothing_is_nothing():
     assert merge_segments([]) == []
 
 
+def test_merging_stops_at_a_ceiling():
+    """Regression from a real 19-minute lecture.
+
+    Recording chunks are contiguous - one ends at 30.0s and the next begins at
+    30.0s, a gap of zero - so an uninterrupted speaker merged across every
+    boundary and the whole talk became one utterance. The segmenter cannot split
+    a single utterance, so the entire lecture went to the model in one call and
+    came back summarised rather than extracted: two key points for nineteen
+    minutes.
+    """
+    contiguous = [
+        seg(SYSTEM, i * 30.0, (i + 1) * 30.0, f"chunk {i} of continuous speech")
+        for i in range(20)
+    ]
+    merged = merge_segments(contiguous)
+
+    assert len(merged) > 1, "a 10-minute monologue must not become one utterance"
+    assert all(s.end_s - s.start_s <= 30.0 for s in merged)
+
+
+def test_ceiling_does_not_break_ordinary_merging():
+    """Short back-to-back fragments should still join into one turn."""
+    merged = merge_segments([
+        seg(MIC, 0.0, 2.0, "I'll have the spec"),
+        seg(MIC, 2.5, 4.0, "to you by Friday"),
+    ])
+    assert len(merged) == 1
+
+
+def test_no_text_is_lost_when_the_ceiling_splits():
+    contiguous = [
+        seg(SYSTEM, i * 30.0, (i + 1) * 30.0, f"part{i}") for i in range(6)
+    ]
+    merged = merge_segments(contiguous)
+    combined = " ".join(s.text for s in merged)
+    for i in range(6):
+        assert f"part{i}" in combined
+
+
 # --- transcript assembly ----------------------------------------------------
 
 
