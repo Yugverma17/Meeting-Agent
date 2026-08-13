@@ -927,6 +927,17 @@ def learn(
     path.write_text(notes.as_markdown(), encoding="utf-8")
     console.print(f"[green]Notes saved to {path}[/green]")
 
+    # Keep the transcript too. Notes are a lossy summary, and the words actually
+    # spoken are worth more than the cost of storing them.
+    if active_project is not None:
+        active_project.transcripts_dir.mkdir(parents=True, exist_ok=True)
+        transcript_path = active_project.transcripts_dir / f"{transcript.meeting_id}.json"
+    else:
+        transcript_path = RUNS_DIR / "transcripts" / f"{transcript.meeting_id}.json"
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    transcript_path.write_text(transcript.model_dump_json(indent=2), encoding="utf-8")
+    console.print(f"[green]Transcript saved to {transcript_path}[/green]")
+
     if active_project is not None:
         from quorum.memory import ProjectMemory
 
@@ -938,6 +949,121 @@ def learn(
             f"Ask questions with: [bold]quorum ask \"...\" "
             f"--project {active_project.meta.id}[/bold]"
         )
+
+
+@app.command()
+def transcript(
+    which: str = typer.Argument("", help="Meeting id or part of its title. Omit to list."),
+    project_name: str = typer.Option("", "--project", help="Which project."),
+    file: str = typer.Option("", help="Read a transcript JSON directly instead."),
+    style: str = typer.Option(
+        "speakers", help="speakers | timestamped | plain | markdown | srt"
+    ),
+    speaker: str = typer.Option("", help="Only this person's lines."),
+    start: str = typer.Option("", help='Skip before this time, e.g. "12:30".'),
+    end: str = typer.Option("", help="Stop after this time."),
+    search: str = typer.Option("", help="Only lines containing this text."),
+    out: str = typer.Option("", help="Write to a file instead of printing."),
+    who: bool = typer.Option(False, help="Show who spoke and how much, then exit."),
+) -> None:
+    """Print the full transcript of a meeting or lecture.
+
+    Examples:
+
+      quorum transcript --project dsa                    list what is available
+      quorum transcript postfix --project dsa            print it
+      quorum transcript postfix --project dsa --style srt --out lecture.srt
+      quorum transcript standup --project team --speaker "Priya"
+      quorum transcript seminar --project x --start 40:00 --end 55:00
+      quorum transcript standup --project team --search "deadline"
+    """
+    from rapidfuzz import fuzz
+
+    from quorum.export import Style, parse_time, render, stats
+    from quorum.models import Transcript as TranscriptModel
+
+    setup_logging("WARNING")
+
+    if file:
+        path = Path(file)
+        if not path.exists():
+            console.print(f"[red]No such file: {file}[/red]")
+            raise typer.Exit(1)
+        found = TranscriptModel.model_validate_json(path.read_text(encoding="utf-8"))
+        available = [found]
+    else:
+        _, active = _load_project(project_name)
+        available = active.transcripts()
+        loose = RUNS_DIR / "transcripts"
+        if loose.exists():
+            available += [
+                TranscriptModel.model_validate_json(p.read_text(encoding="utf-8"))
+                for p in sorted(loose.glob("*.json"))
+            ]
+        if not available:
+            console.print("[yellow]No transcripts stored yet.[/yellow] "
+                          "Record with [bold]--project[/bold] to keep them.")
+            raise typer.Exit(1)
+
+    if not which and not file:
+        table = Table(title="Stored transcripts", header_style="bold")
+        table.add_column("id")
+        table.add_column("title")
+        table.add_column("date")
+        table.add_column("lines", justify="right")
+        for item in available:
+            table.add_row(item.meeting_id, item.title or "-",
+                          item.meeting_date.isoformat(), str(len(item.utterances)))
+        console.print(table)
+        console.print("\n[dim]Print one: quorum transcript <id or title words>[/dim]")
+        return
+
+    if which:
+        scored = sorted(
+            available,
+            key=lambda t: -max(
+                fuzz.partial_ratio(which.lower(), t.meeting_id.lower()),
+                fuzz.partial_ratio(which.lower(), (t.title or "").lower()),
+            ),
+        )
+        chosen = scored[0]
+    else:
+        chosen = available[0]
+
+    if who:
+        summary = stats(chosen)
+        table = Table(title=f"{chosen.title or chosen.meeting_id} - who spoke",
+                      header_style="bold")
+        table.add_column("Speaker")
+        table.add_column("Words", justify="right")
+        table.add_column("Share", justify="right")
+        for name, row in summary["by_speaker"].items():
+            table.add_row(name, str(row["words"]), f"{row['share']:.0%}")
+        console.print(table)
+        console.print(f"[dim]{summary['utterances']} lines, {summary['words']} words[/dim]")
+        return
+
+    try:
+        text = render(
+            chosen, Style(style), speaker=speaker or None,
+            start_s=parse_time(start), end_s=parse_time(end), search=search or None,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    if not text:
+        console.print("[yellow]Nothing matched those filters.[/yellow]")
+        raise typer.Exit(1)
+
+    if out:
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).write_text(text, encoding="utf-8")
+        console.print(f"[green]Written to {out}[/green] ({len(text.splitlines())} lines)")
+    else:
+        # Printed raw, not through rich markup - a transcript containing [square
+        # brackets] would otherwise be eaten as formatting tags.
+        print(text)
 
 
 @app.command()

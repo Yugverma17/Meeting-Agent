@@ -281,6 +281,29 @@ such, and the distinction stays visible.
 `--system-only` (the default) captures just the video's audio, halving the
 audio-seconds spent and removing echo as a concern.
 
+## The transcript itself
+
+Notes are a lossy summary. The words actually spoken are kept too, and can be
+read back in whichever shape suits the task.
+
+```bash
+quorum transcript --project dsa                          # what is stored
+quorum transcript postfix --project dsa                  # read it
+quorum transcript postfix --project dsa --who            # who spoke, how much
+quorum transcript standup --project team --speaker Priya # one person's lines
+quorum transcript seminar --project x --start 40:00 --end 55:00
+quorum transcript standup --project team --search deadline
+quorum transcript postfix --project dsa --style srt --out lecture.srt
+```
+
+Five styles: `speakers` (default, attributable), `timestamped` (single-speaker
+lectures), `plain` (continuous prose for pasting elsewhere), `markdown`
+(grouped by speaker), and `srt` (subtitles you can load alongside the recording).
+
+Filtering is the part that gets used. A two-hour seminar is unreadable in full,
+but *"everything the speaker said between 40 and 55 minutes"* is exactly what you
+want when you half-remember something from the middle of it.
+
 ## Using it week to week
 
 A project is what makes meetings accumulate. Without one, `record` analyses a
