@@ -93,12 +93,16 @@ class ProjectMemory:
 
             self.path.mkdir(parents=True, exist_ok=True)
             db = lancedb.connect(str(self.path))
-            # list_tables() replaced table_names(); fall back for older builds.
-            lister = getattr(db, "list_tables", None) or db.table_names
-            if TABLE in lister():
+            self._db = db
+            # Open directly rather than checking a listing first. The listing
+            # API has moved between releases, and when the check quietly failed
+            # on an existing table the code fell through to create_table and
+            # errored with "Table 'memory' already exists" - degrading a working
+            # store to the in-process fallback and losing persistence.
+            try:
                 self._table = db.open_table(TABLE)
-            else:
-                self._db = db
+            except Exception:  # noqa: BLE001 - absent table is the normal first run
+                self._table = None
         except Exception as exc:  # noqa: BLE001 - any failure degrades, never raises
             log.warning("Vector store unavailable (%s); using in-process memory", exc)
             self._fallback = []
@@ -117,7 +121,11 @@ class ProjectMemory:
                 import lancedb
 
                 db = getattr(self, "_db", None) or lancedb.connect(str(self.path))
-                self._table = db.create_table(TABLE, data=rows)
+                try:
+                    self._table = db.create_table(TABLE, data=rows)
+                except Exception:  # noqa: BLE001 - lost a race, or it existed after all
+                    self._table = db.open_table(TABLE)
+                    self._table.add(rows)
             else:
                 self._table.add(rows)
         except Exception as exc:  # noqa: BLE001

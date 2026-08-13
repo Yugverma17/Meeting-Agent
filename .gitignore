@@ -32,6 +32,10 @@ lancedb/
 runs/
 reports/*.html
 
+# Exported artefacts from real recordings
+*.srt
+*.vtt
+
 # OS / editor
 .DS_Store
 Thumbs.db

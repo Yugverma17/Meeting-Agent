@@ -817,6 +817,63 @@ def record(
     console.print(f"  Next: [bold]quorum today --project {active_project.meta.id}[/bold]")
 
 
+def _analyse_lecture(transcript, active_project, out: str = "") -> None:
+    """Notes, disk, index. Shared by live capture and transcript re-analysis."""
+    from datetime import date as _date
+
+    from quorum.agents.embedding import LexicalEmbedder
+    from quorum.agents.segmenter import Segmenter, SegmenterConfig
+    from quorum.analysis import LectureAnalyser
+
+    # Lectures are monologue: larger segments give the model more context per
+    # call, and there are no turn boundaries worth preserving.
+    topics = Segmenter(
+        config=SegmenterConfig(max_tokens=2400, min_utterances=6),
+        embedder=LexicalEmbedder(),
+    ).segment(transcript)
+
+    with console.status(f"Taking notes across {len(topics)} topic(s)..."):
+        notes = LectureAnalyser().analyse(transcript, topics)
+
+    console.print()
+    console.print(notes.as_markdown())
+    console.print(
+        f"\n[dim]{notes.llm_calls} calls, {notes.total_tokens:,} tokens, "
+        f"{notes.latency_s:.0f}s, cost $0.00"
+        + (f", {notes.filler_dropped} content-free item(s) dropped"
+           if notes.filler_dropped else "")
+        + "[/dim]"
+    )
+
+    path = Path(out) if out else RUNS_DIR / "notes" / f"{_date.today()}_{transcript.meeting_id}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(notes.as_markdown(), encoding="utf-8")
+    console.print(f"[green]Notes saved to {path}[/green]")
+
+    # Keep the transcript too. Notes are a lossy summary, and the words actually
+    # spoken are worth more than the cost of storing them.
+    if active_project is not None:
+        active_project.transcripts_dir.mkdir(parents=True, exist_ok=True)
+        transcript_path = active_project.transcripts_dir / f"{transcript.meeting_id}.json"
+    else:
+        transcript_path = RUNS_DIR / "transcripts" / f"{transcript.meeting_id}.json"
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    transcript_path.write_text(transcript.model_dump_json(indent=2), encoding="utf-8")
+    console.print(f"[green]Transcript saved to {transcript_path}[/green]")
+
+    if active_project is not None:
+        from quorum.memory import ProjectMemory
+
+        indexed = ProjectMemory(active_project.memory_dir).index_notes(
+            transcript.meeting_id, notes.title, _date.today(), notes
+        )
+        console.print(
+            f"[green]Indexed {indexed} item(s) into {active_project.meta.name}.[/green] "
+            f"Ask questions with: [bold]quorum ask \"...\" "
+            f"--project {active_project.meta.id}[/bold]"
+        )
+
+
 @app.command()
 def learn(
     minutes: float = typer.Option(0.0, help="Stop after N minutes. 0 = until Ctrl+C."),
@@ -826,6 +883,9 @@ def learn(
     ),
     system_only: bool = typer.Option(
         True, help="Capture only the video's audio, not your microphone."
+    ),
+    from_transcript: str = typer.Option(
+        "", help="Re-analyse a saved transcript instead of recording again."
     ),
     out: str = typer.Option("", help="Write the notes to this markdown file."),
 ) -> None:
@@ -855,6 +915,34 @@ def learn(
     active_project = None
     if project_name:
         _, active_project = _load_project(project_name)
+
+    if from_transcript:
+        # Re-analysing a stored transcript costs no recording time and no
+        # transcription quota. Prompt changes can then be judged against the
+        # same lecture rather than a different one.
+        from quorum.models import Transcript as TranscriptModel
+
+        source = Path(from_transcript)
+        if not source.exists():
+            _, owner = _load_project(project_name) if project_name else (None, None)
+            candidates = list(owner.transcripts_dir.glob("*.json")) if owner else []
+            match = next(
+                (c for c in candidates if from_transcript.lower() in c.stem.lower()), None
+            )
+            if match is None:
+                console.print(f"[red]No transcript at {from_transcript}[/red]")
+                if candidates:
+                    console.print("Available: " + ", ".join(c.stem for c in candidates))
+                raise typer.Exit(1)
+            source = match
+
+        transcript = TranscriptModel.model_validate_json(source.read_text(encoding="utf-8"))
+        if title:
+            transcript.title = title
+        console.print(f"[dim]Re-analysing {source.name} "
+                      f"({len(transcript.utterances)} utterances)[/dim]")
+        _analyse_lecture(transcript, active_project, out)
+        return
 
     console.print("[bold]Listening.[/bold] Start the video now if you have not.")
     console.print("[dim]Press Ctrl+C when the lecture ends.[/dim]\n")
@@ -905,50 +993,7 @@ def learn(
         segments, SpeakerRoster.solo("You"), meeting_date=_date.today(),
         title=title or "Lecture",
     )
-    # Lectures are monologue: larger segments give the model more context per
-    # call and there are no turn boundaries worth preserving.
-    topics = Segmenter(
-        config=SegmenterConfig(max_tokens=2400, min_utterances=6),
-        embedder=LexicalEmbedder(),
-    ).segment(transcript)
-
-    with console.status(f"Taking notes across {len(topics)} topic(s)..."):
-        notes = LectureAnalyser().analyse(transcript, topics)
-
-    console.print()
-    console.print(notes.as_markdown())
-    console.print(
-        f"\n[dim]{notes.llm_calls} calls, {notes.total_tokens:,} tokens, "
-        f"{notes.latency_s:.0f}s, cost $0.00[/dim]"
-    )
-
-    path = Path(out) if out else RUNS_DIR / "notes" / f"{_date.today()}_{transcript.meeting_id}.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(notes.as_markdown(), encoding="utf-8")
-    console.print(f"[green]Notes saved to {path}[/green]")
-
-    # Keep the transcript too. Notes are a lossy summary, and the words actually
-    # spoken are worth more than the cost of storing them.
-    if active_project is not None:
-        active_project.transcripts_dir.mkdir(parents=True, exist_ok=True)
-        transcript_path = active_project.transcripts_dir / f"{transcript.meeting_id}.json"
-    else:
-        transcript_path = RUNS_DIR / "transcripts" / f"{transcript.meeting_id}.json"
-        transcript_path.parent.mkdir(parents=True, exist_ok=True)
-    transcript_path.write_text(transcript.model_dump_json(indent=2), encoding="utf-8")
-    console.print(f"[green]Transcript saved to {transcript_path}[/green]")
-
-    if active_project is not None:
-        from quorum.memory import ProjectMemory
-
-        indexed = ProjectMemory(active_project.memory_dir).index_notes(
-            transcript.meeting_id, notes.title, _date.today(), notes
-        )
-        console.print(
-            f"[green]Indexed {indexed} item(s) into {active_project.meta.name}.[/green] "
-            f"Ask questions with: [bold]quorum ask \"...\" "
-            f"--project {active_project.meta.id}[/bold]"
-        )
+    _analyse_lecture(transcript, active_project, out)
 
 
 @app.command()

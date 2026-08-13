@@ -267,6 +267,72 @@ def test_markdown_omits_empty_sections():
     assert "## Worked examples" not in markdown
 
 
+def test_content_free_points_are_dropped(transcript):
+    """Regression from a real lecture: eight of thirteen points said nothing.
+
+    "An example was mentioned" occupies a line, looks like content, and tells
+    the reader nothing they can revise from - worse than a missing note.
+    """
+    router = FakeRouter([
+        notes_with(key_points=[
+            KeyPoint(point="An example was mentioned"),
+            KeyPoint(point="Data modeling was discussed"),
+            KeyPoint(point="The speaker mentioned ID handling"),
+            KeyPoint(point="Scaling was covered"),
+            KeyPoint(point="NoSQL databases scale horizontally by adding machines"),
+        ])
+    ], SYNTHESIS)
+
+    notes = LectureAnalyser(router=router).analyse(transcript, whole(transcript))
+
+    assert [p.point for p in notes.key_points] == [
+        "NoSQL databases scale horizontally by adding machines"
+    ]
+    assert notes.filler_dropped == 4
+
+
+def test_channel_housekeeping_is_ignored(transcript):
+    """A recorded lecture extracted "subscription" as a concept, defined as
+    "signing up to receive updates". That was the YouTuber's subscribe pitch."""
+    router = FakeRouter([
+        notes_with(
+            key_points=[KeyPoint(point="Remember to subscribe to the channel"),
+                        KeyPoint(point="A stack is last-in-first-out")],
+            concepts=[Concept(term="subscription",
+                              plain_explanation="signing up to receive updates"),
+                      Concept(term="stack", plain_explanation="last in, first out")],
+        )
+    ], SYNTHESIS)
+
+    notes = LectureAnalyser(router=router).analyse(transcript, whole(transcript))
+
+    assert [c.term for c in notes.concepts] == ["stack"]
+    assert all("subscribe" not in p.point.lower() for p in notes.key_points)
+
+
+def test_a_substantive_point_survives_a_reporting_phrase(transcript):
+    """"was discussed" is only fatal when nothing else is said. A long point
+    that happens to contain the phrase can still be worth keeping."""
+    long_point = (
+        "The trade-off between vertical and horizontal scaling was discussed at "
+        "length: vertical means a bigger machine and hits a hardware ceiling, "
+        "horizontal means more machines and needs the data sharded first."
+    )
+    router = FakeRouter([notes_with(key_points=[KeyPoint(point=long_point)])], SYNTHESIS)
+    notes = LectureAnalyser(router=router).analyse(transcript, whole(transcript))
+
+    assert len(notes.key_points) == 1
+
+
+def test_prompt_forbids_reporting_style_points(transcript):
+    router = FakeRouter([notes_with()], SYNTHESIS)
+    LectureAnalyser(router=router).analyse(transcript, whole(transcript))
+
+    system = router.systems[0]
+    assert "was mentioned" in system
+    assert "subscribe" in system.lower()
+
+
 def test_timestamps_make_notes_navigable():
     """A key point you cannot find in the video is close to useless."""
     notes = LectureNotes(key_points=[KeyPoint(point="the important bit", timestamp="12:34")])
