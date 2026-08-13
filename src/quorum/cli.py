@@ -818,6 +818,171 @@ def record(
 
 
 @app.command()
+def learn(
+    minutes: float = typer.Option(0.0, help="Stop after N minutes. 0 = until Ctrl+C."),
+    title: str = typer.Option("", help="What you are watching."),
+    project_name: str = typer.Option(
+        "", "--project", help="Save notes here so `quorum ask` can search them."
+    ),
+    system_only: bool = typer.Option(
+        True, help="Capture only the video's audio, not your microphone."
+    ),
+    out: str = typer.Option("", help="Write the notes to this markdown file."),
+) -> None:
+    """Take study notes from a lecture, talk or seminar.
+
+    Works on anything that makes sound - a YouTube lecture, a recorded seminar,
+    a live webinar, a conference talk. Produces a summary, timestamped key
+    points, jargon explained in plain English, worked examples and what the
+    speaker assumed you already knew.
+
+    Start the video, then start this.
+    """
+    import time as _time
+    from datetime import date as _date
+
+    from quorum.agents.embedding import LexicalEmbedder
+    from quorum.agents.segmenter import Segmenter, SegmenterConfig
+    from quorum.analysis import LectureAnalyser
+    from quorum.capture.audio import SYSTEM, DualRecorder, RecorderConfig
+    from quorum.capture.echo import suppress_echo
+    from quorum.capture.speakers import SpeakerRoster, build_transcript
+    from quorum.capture.transcribe import WhisperTranscriber
+
+    setup_logging("WARNING")
+    ensure_dirs()
+
+    active_project = None
+    if project_name:
+        _, active_project = _load_project(project_name)
+
+    console.print("[bold]Listening.[/bold] Start the video now if you have not.")
+    console.print("[dim]Press Ctrl+C when the lecture ends.[/dim]\n")
+
+    recorder = DualRecorder(RecorderConfig())
+    try:
+        recorder.start(announced=True)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Could not start recording: {exc}[/red]")
+        raise typer.Exit(1)
+
+    deadline = _time.time() + minutes * 60 if minutes else None
+    try:
+        while deadline is None or _time.time() < deadline:
+            _time.sleep(1.0)
+            console.print(
+                f"  listening {recorder.captured_seconds / 60:.1f} min, "
+                f"{recorder.skipped_silent} silent chunk(s) skipped",
+                end="\r",
+            )
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopping...[/yellow]")
+    finally:
+        recorder.stop()
+
+    chunks = recorder.drain()
+    if system_only:
+        # A lecture is the speaker, not you. Dropping the microphone halves the
+        # audio-seconds spent and removes echo as a concern entirely.
+        chunks = [c for c in chunks if c.channel == SYSTEM]
+    if not chunks:
+        console.print("[red]No audio captured.[/red] Was the video playing?")
+        raise typer.Exit(1)
+
+    transcriber = WhisperTranscriber()
+    with console.status(f"Transcribing {len(chunks)} chunk(s)..."):
+        segments = transcriber.transcribe_all(chunks)
+    if not system_only:
+        segments, _ = suppress_echo(segments)
+    console.print(f"Transcribed {transcriber.stats.audio_seconds:.0f}s of audio "
+                  f"({transcriber.stats.daily_budget_used:.1%} of today's free budget)")
+
+    if not segments:
+        console.print("[red]No speech recognised.[/red]")
+        raise typer.Exit(1)
+
+    transcript = build_transcript(
+        segments, SpeakerRoster.solo("You"), meeting_date=_date.today(),
+        title=title or "Lecture",
+    )
+    # Lectures are monologue: larger segments give the model more context per
+    # call and there are no turn boundaries worth preserving.
+    topics = Segmenter(
+        config=SegmenterConfig(max_tokens=2400, min_utterances=6),
+        embedder=LexicalEmbedder(),
+    ).segment(transcript)
+
+    with console.status(f"Taking notes across {len(topics)} topic(s)..."):
+        notes = LectureAnalyser().analyse(transcript, topics)
+
+    console.print()
+    console.print(notes.as_markdown())
+    console.print(
+        f"\n[dim]{notes.llm_calls} calls, {notes.total_tokens:,} tokens, "
+        f"{notes.latency_s:.0f}s, cost $0.00[/dim]"
+    )
+
+    path = Path(out) if out else RUNS_DIR / "notes" / f"{_date.today()}_{transcript.meeting_id}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(notes.as_markdown(), encoding="utf-8")
+    console.print(f"[green]Notes saved to {path}[/green]")
+
+    if active_project is not None:
+        from quorum.memory import ProjectMemory
+
+        indexed = ProjectMemory(active_project.memory_dir).index_notes(
+            transcript.meeting_id, notes.title, _date.today(), notes
+        )
+        console.print(
+            f"[green]Indexed {indexed} item(s) into {active_project.meta.name}.[/green] "
+            f"Ask questions with: [bold]quorum ask \"...\" "
+            f"--project {active_project.meta.id}[/bold]"
+        )
+
+
+@app.command()
+def ask(
+    question: str = typer.Argument(..., help="What you want to know."),
+    project_name: str = typer.Option("", "--project", help="Which project's notes."),
+    k: int = typer.Option(6, help="How many passages to retrieve."),
+) -> None:
+    """Answer a question from your indexed lectures and meetings."""
+    from quorum.llm.providers import ModelTier
+    from quorum.llm.router import get_router
+    from quorum.memory import ProjectMemory
+
+    setup_logging("WARNING")
+    _, found = _load_project(project_name)
+    memory = ProjectMemory(found.memory_dir)
+
+    hits = memory.recall(question, k=k)
+    if not hits:
+        console.print("[yellow]Nothing indexed matches that.[/yellow] "
+                      "Record a lecture with [bold]quorum learn --project ...[/bold] first.")
+        raise typer.Exit(1)
+
+    passages = "\n\n".join(f"[{i + 1}] ({hit.meeting_date}) {hit.text}"
+                           for i, hit in enumerate(hits))
+    prompt = (
+        f"Retrieved passages from the user's own notes:\n\n{passages}\n\n"
+        f"Question: {question}\n\n"
+        "Answer using only these passages, citing the [n] you used. If they do "
+        "not contain the answer, say so plainly rather than filling the gap from "
+        "general knowledge - the user is asking what THEIR material said."
+    )
+    with console.status("Thinking..."):
+        response = get_router().complete(
+            prompt, tier=ModelTier.BALANCED, max_tokens=1024, purpose="ask"
+        )
+
+    console.print(f"\n{response.text}\n")
+    console.print("[dim]Sources:[/dim]")
+    for index, hit in enumerate(hits, start=1):
+        console.print(f"  [dim][{index}] {hit.meeting_date} ({hit.score:.2f}) "
+                      f"{hit.text[:90]}...[/dim]")
+
+
+@app.command()
 def ami(
     path: str = typer.Option("data/ami", help="Where the corpus was unpacked."),
     limit: int = typer.Option(5, help="Meetings to evaluate. Each costs quota."),

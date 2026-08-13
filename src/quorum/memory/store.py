@@ -48,6 +48,9 @@ class MemoryKind(str, Enum):
     DECISION = "decision"
     UTTERANCE = "utterance"
     RISK = "risk"
+    NOTE = "note"
+    """A point or concept from a lecture. Indexed so questions can be asked
+    across everything watched, not just the most recent talk."""
 
 
 @dataclass
@@ -168,6 +171,48 @@ class ProjectMemory:
         for row, vector in zip(rows, vectors):
             row["vector"] = vector.tolist()
 
+        self._append(rows)
+        return len(rows)
+
+    def index_notes(self, source_id: str, title: str, when: date, notes) -> int:
+        """Index lecture notes so they can be searched later.
+
+        Concepts are stored as "term: explanation" rather than the term alone -
+        a bare term embeds poorly and a question like "how does backprop work"
+        needs the explanation's words to match against.
+        """
+        texts: list[str] = []
+        rows: list[dict] = []
+        stamp = when.isoformat()
+
+        def stage(ref: str, text: str) -> None:
+            cleaned = (text or "").strip()
+            if not cleaned:
+                return
+            texts.append(cleaned)
+            rows.append({
+                "kind": MemoryKind.NOTE.value, "ref_id": ref, "text": cleaned,
+                "meeting_id": source_id, "meeting_date": stamp,
+            })
+
+        for index, concept in enumerate(getattr(notes, "concepts", [])):
+            stage(f"{source_id}:concept:{index}",
+                  f"{concept.term}: {concept.plain_explanation} {concept.why_it_matters}".strip())
+        for index, point in enumerate(getattr(notes, "key_points", [])):
+            stage(f"{source_id}:point:{index}", f"{point.point} {point.detail}".strip())
+        for index, example in enumerate(getattr(notes, "examples", [])):
+            stage(f"{source_id}:example:{index}",
+                  f"{example.description} {example.what_it_demonstrates}".strip())
+        if getattr(notes, "summary", ""):
+            stage(f"{source_id}:summary", f"{title}. {notes.summary}")
+
+        if not rows:
+            return 0
+
+        self._forget_meeting(source_id)
+        vectors = self.embedder.embed(texts)
+        for row, vector in zip(rows, vectors):
+            row["vector"] = vector.tolist()
         self._append(rows)
         return len(rows)
 

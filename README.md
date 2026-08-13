@@ -244,6 +244,43 @@ Built on **free-tier APIs only**, on a laptop with **7.6 GB RAM and no GPU**:
 - **Gmail and Calendar transports are dry-run.** The approval gate, digest
   building and evidence interface are real and tested; OAuth is not wired.
 
+## Lecture mode
+
+The same capture spine, a different question at the end. A meeting is a source
+of obligations; a lecture is a source of understanding, and none of the chasing
+machinery applies.
+
+```bash
+quorum learn --title "Postfix evaluation" --project dsa
+quorum ask "why is postfix evaluation O(n)" --project dsa
+```
+
+Start the video, start the command, press Ctrl+C when it ends. You get markdown
+study notes: a summary, **timestamped** key points, jargon explained in plain
+English, worked examples, what the speaker assumed you already knew, and what
+was left unanswered. Notes are indexed, so `ask` answers questions across
+everything you have watched, with citations.
+
+Two design points worth naming:
+
+**Two passes, not one.** Key points and concepts are extracted per segment, then
+a single synthesis pass writes the summary *from those points* rather than from
+the raw transcript. Necessary under a 6k tokens/minute budget — a 50-minute
+lecture is ~40k tokens — and better anyway: a summary built from distilled points
+is more coherent than one written from an hour of speech in one gulp.
+
+**The summary is held to what was actually said; concept explanations are not.**
+The first version invented "also known as Reverse Polish notation, which removes
+the need for parentheses" — true, well-known, and never mentioned in the talk.
+Someone revising for an exam from notes asserting material their lecturer never
+covered is worse off than with no notes. The synthesis prompt now forbids adding
+outside knowledge outright. Concept explanations *do* add background, because
+explaining an undefined term is the entire point — so that section is labelled as
+such, and the distinction stays visible.
+
+`--system-only` (the default) captures just the video's audio, halving the
+audio-seconds spent and removing echo as a concern.
+
 ## Using it week to week
 
 A project is what makes meetings accumulate. Without one, `record` analyses a
