@@ -10,6 +10,59 @@ from quorum.llm.ratelimit import QuotaTracker
 from quorum.models import Speaker, Transcript, Utterance
 
 
+@pytest.fixture(scope="session", autouse=True)
+def never_upload_traces():
+    """Cut LangSmith's HTTP layer for the whole session.
+
+    Tracing tests set a fake key to exercise the real `traceable` wrapping.
+    LangSmith batches uploads on a background thread that flushes at process
+    exit - after any per-test patching has been torn down - so a function-scoped
+    patch still let the suite POST to the real API and collect 403s. Severing it
+    once, for the session, and deliberately never restoring it is what keeps the
+    suite offline.
+    """
+    try:
+        from langsmith.client import Client
+    except ImportError:  # pragma: no cover - langsmith ships with langchain-core
+        yield
+        return
+
+    for name in ("request_with_retries", "_send_multipart_req",
+                 "_send_compressed_multipart_req"):
+        if hasattr(Client, name):
+            setattr(Client, name, lambda self, *args, **kwargs: None)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def no_real_quota_and_no_sleeping(tmp_path, monkeypatch):
+    """Keep the suite off the real quota file, and stop it ever sleeping.
+
+    `get_router()` memoises a process-wide Router whose default `QuotaTracker`
+    reads `.cache/quota_state.json` - the real one. Anything that reaches it
+    after a day of real API use sees exhausted windows and *waits*, up to 65
+    seconds per call, silently. One run of this suite took 22 minutes instead of
+    28 seconds for exactly that reason, right after the AMI evaluation had burned
+    through the day's Groq allowance.
+
+    Nothing in the suite is supposed to reach the global router. This makes that
+    true rather than assumed, and makes a violation fail fast instead of slowly.
+    """
+    import quorum.llm.router as router_module
+
+    monkeypatch.setattr(router_module, "_router", None)
+    original = router_module.Router.__init__
+
+    def no_waiting(self, *args, **kwargs):
+        kwargs.setdefault("max_wait_s", 0.0)
+        kwargs.setdefault("quota", QuotaTracker(tmp_path / "quota_state.json"))
+        original(self, *args, **kwargs)
+
+    monkeypatch.setattr(router_module.Router, "__init__", no_waiting)
+    yield
+    router_module._router = None
+
+
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     """Settings with both providers 'configured' but no real network access."""

@@ -125,6 +125,13 @@ class Ledger:
         elif update.kind is StatusKind.SLIPPED:
             resolved = resolve_deadline(update.new_deadline_text, meeting_date)
             if resolved.value:
+                # Recorded before the overwrite. Without this the old date is
+                # gone, and "this has moved three times" - the sentence a weekly
+                # report exists to produce - cannot be said at all.
+                target.record_deadline_change(
+                    resolved.value, on=meeting_date, source="meeting",
+                    note=update.new_deadline_text or "",
+                )
                 target.deadline = Deadline(
                     raw_text=update.new_deadline_text, resolved=resolved.value,
                     method=resolved.method, confidence=resolved.confidence,

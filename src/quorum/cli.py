@@ -9,11 +9,13 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import sys
 from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from quorum import __version__
@@ -23,6 +25,7 @@ from quorum.config import (
     LLM_CACHE_DIR,
     RUNS_DIR,
     ensure_dirs,
+    free_path,
     get_settings,
     setup_logging,
 )
@@ -31,8 +34,56 @@ from quorum.llm.providers import WHISPER_MODEL, registry
 from quorum.llm.ratelimit import QuotaTracker
 from quorum.llm.router import Router
 
+def _make_console_unicode_safe() -> None:
+    """Stop a stray character from killing a command on a Windows console.
+
+    A Windows terminal defaults to cp1252, which cannot encode the non-breaking
+    hyphens, smart quotes and en dashes that models produce constantly. Printing
+    one raised `UnicodeEncodeError` from deep inside rich and lost the whole
+    answer - including, on `learn`, notes that had already cost quota to produce.
+
+    UTF-8 first, since modern Windows Terminal handles it; `errors="replace"`
+    behind it so a console that does not is left with a substituted character
+    rather than a traceback.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):  # pragma: no cover - redirected
+            pass
+
+
+_make_console_unicode_safe()
+
 app = typer.Typer(add_completion=False, help="Quorum - meeting commitment agent.")
 console = Console()
+
+
+def show(text: str, style: str = "") -> None:
+    """Print text exactly as it is.
+
+    Rich reads square brackets as style tags and silently deletes anything it
+    does not recognise. On a data-structures lecture that is catastrophic and
+    invisible: `last[ch] = i` reached the terminal as `last = i`, and
+    `dp[i][j] = dp[i-1][j]` as `dp = dp`. The answer was correct; the display
+    destroyed it, and nothing anywhere reported an error.
+
+    Use this for anything the project did not write itself - model output,
+    transcript lines, notes, commitment descriptions, email bodies.
+    `highlight=False` also stops rich recolouring numbers inside code.
+    """
+    console.print(text, markup=False, highlight=False, style=style or None)
+
+
+def safe(text: str) -> str:
+    """User or model text, escaped so it can sit inside a styled string.
+
+    For the cases `show` cannot serve - a table cell, or content wrapped in
+    `[dim]...[/dim]`. Table cells are rendered with markup too, so a commitment
+    described as "fix dp[i] handling" loses the subscript in `quorum status`
+    exactly as it does anywhere else.
+    """
+    return escape(text or "")
 
 
 @app.command()
@@ -73,14 +124,21 @@ def doctor(probe: bool = typer.Option(False, help="Make one real call per provid
         "Groq key", ok if settings.groq_api_key else warn,
         "set" if settings.groq_api_key else "https://console.groq.com/keys",
     )
+    from quorum.integrations import credentials_status
+    from quorum.llm.tracing import tracing_enabled
+
     table.add_row(
-        "Langfuse", ok if settings.langfuse_public_key else warn,
-        "set" if settings.langfuse_public_key else "optional until tracing phase",
+        "LangSmith", ok if tracing_enabled() else warn,
+        f"tracing to project {settings.langsmith_project!r}" if tracing_enabled()
+        else "no LANGSMITH_API_KEY - runs are untraced",
     )
     table.add_row(
         "GitHub token", ok if settings.github_token else warn,
         "set" if settings.github_token else "optional until reality-verification phase",
     )
+
+    google = credentials_status()
+    table.add_row("Google Calendar", ok if google.ready else warn, google.message)
 
     entries, total_bytes = LLMCache(LLM_CACHE_DIR).size()
     table.add_row("LLM cache", ok, f"{entries} entries, {total_bytes / 1e6:.1f} MB")
@@ -340,8 +398,15 @@ def _load_project(name: str):
 
     project = workspace.get(name)
     if project is None:
-        console.print(f"[red]No project {name!r}.[/red] "
-                      "Run [bold]quorum project[/bold] to list them.")
+        # Naming a project that does not exist yet is the overwhelmingly common
+        # way to arrive here - usually seconds before a lecture starts. Listing
+        # what exists is only half an answer; the other half is the one command
+        # that fixes it.
+        console.print(f"[red]No project {name!r}.[/red]")
+        existing = workspace.list()
+        if existing:
+            console.print("Existing: " + ", ".join(p.id for p in existing))
+        console.print(f'Create it: [bold]quorum project --create "{name}"[/bold]')
         raise typer.Exit(1)
     return workspace, project
 
@@ -439,8 +504,8 @@ def status(project_name: str = typer.Option("", "--project", help="Which project
         else:
             state = f"in {(due - today_date).days}d"
         table.add_row(
-            item.assignee.display_name or "[dim]unassigned[/dim]",
-            item.description,
+            safe(item.assignee.display_name) or "[dim]unassigned[/dim]",
+            safe(item.description),
             due.isoformat() if due else "-",
             state,
         )
@@ -500,8 +565,8 @@ def today(
         style = colour.get(action.action, "dim")
         table.add_row(
             f"[{style}]{action.action.value}[/{style}]",
-            item.description if item else action.commitment_id,
-            action.reason,
+            safe(item.description if item else action.commitment_id),
+            safe(action.reason),
         )
     console.print(table)
 
@@ -521,18 +586,308 @@ def today(
         gate.propose(
             plan.actions[0], digest.subject, body=body, recipient=digest.recipient_email
         )
-        path = drafts_dir / f"{now.isoformat()}_{digest.recipient_email.replace('@', '_at_')}.txt"
+        # Running `today` twice in a morning used to overwrite the first sweep's
+        # drafts, including any you had already edited by hand.
+        path = free_path(
+            drafts_dir, f"{now.isoformat()}_{digest.recipient_email.replace('@', '_at_')}", ".txt"
+        )
         path.write_text(f"To: {digest.recipient_email}\nSubject: {digest.subject}\n\n{body}",
                         encoding="utf-8")
-        console.print(f"[bold]To:[/bold] {digest.recipient_email}")
-        console.print(f"[bold]Subject:[/bold] {digest.subject}")
-        console.print(body)
+        console.print(f"[bold]To:[/bold] {safe(digest.recipient_email)}")
+        console.print(f"[bold]Subject:[/bold] {safe(digest.subject)}")
+        # The body quotes the transcript verbatim, so it can contain anything.
+        show(body)
         console.print(f"[dim]saved to {path}[/dim]\n")
 
     console.print(
         "[yellow]Review the drafts, then send them yourself.[/yellow] "
         "Automatic sending needs Gmail OAuth, which is not wired up."
     )
+    console.print(
+        f"[dim]Deadlines can also live in your calendar: "
+        f"[bold]quorum calendar --project {found.meta.id}[/bold][/dim]"
+    )
+
+
+@app.command()
+def drafts(
+    project_name: str = typer.Option("", "--project", help="Which project."),
+    apply_changes: bool = typer.Option(
+        False, "--apply", help="Put them in your Gmail drafts folder."
+    ),
+    include_done: bool = typer.Option(False, help="Also draft for closed commitments."),
+) -> None:
+    """Write the emails the meeting said you would send.
+
+    Most commitments are work. A few are messages - "I'll email Priya the spec by
+    Friday" - and those are the only ones where the deliverable is something the
+    agent can actually produce for you.
+
+    Runs as a dry run by default. `--apply` puts them in Gmail's Drafts folder,
+    behind the approval gate. Nothing is ever sent.
+    """
+    from quorum.config import RUNS_DIR as _RUNS
+    from quorum.execution import ApprovalGate, DraftWriter, GmailDrafts, find_communications
+    from quorum.execution.mail import GmailDraftTransport
+    from quorum.integrations import GoogleAuthError, credentials_status, get_gmail_service
+    from quorum.tracking import ActionType, PlannedAction
+
+    setup_logging("WARNING")
+    settings = get_settings()
+    _, found = _load_project(project_name)
+
+    pool = found.ledger.commitments if include_done else found.ledger.open_commitments()
+    promised = find_communications(pool)
+    if not promised:
+        console.print(f"[green]No emails were promised on {found.meta.name}.[/green]")
+        console.print("[dim]Only firm commitments that name a sending verb count - "
+                      '"I\'ll email Priya the spec", not "I\'ll finish the migration".[/dim]')
+        return
+
+    console.print(f"[bold]{len(promised)} email(s) promised[/bold] on {found.meta.name}\n")
+
+    writer = DraftWriter()
+    written = []
+    with console.status("Writing..."):
+        for commitment in promised:
+            draft = writer.write(commitment, found)
+            if draft is not None:
+                written.append(draft)
+
+    if not written:
+        console.print("[yellow]Could not draft any of them.[/yellow]")
+        raise typer.Exit(1)
+
+    unaddressed = [d for d in written if not d.addressed]
+    for draft in written:
+        console.print(f"[bold]To:[/bold] {safe(draft.to_email) or '[red]no address[/red]'}"
+                      + (f" [dim]({safe(draft.to_name)})[/dim]" if draft.to_name else ""))
+        console.print(f"[bold]Subject:[/bold] {safe(draft.subject)}")
+        show(draft.body)
+        if draft.quote:
+            console.print(f"[dim]because you said: {safe(draft.quote)}[/dim]")
+        console.print()
+
+    # Always keep a copy on disk. Gmail may be unavailable, unauthorised, or
+    # simply not what the user wants, and re-drafting costs quota.
+    folder = _RUNS / "drafts" / found.meta.id
+    folder.mkdir(parents=True, exist_ok=True)
+    for draft in written:
+        target = free_path(folder, f"{_dt.date.today().isoformat()}_{draft.commitment_id}", ".txt")
+        target.write_text(draft.render(), encoding="utf-8")
+    console.print(f"[dim]Saved {len(written)} draft(s) to {folder}[/dim]")
+
+    if unaddressed:
+        console.print(f"\n[yellow]{len(unaddressed)} has no address[/yellow] - "
+                      "the person is not on this project's roster. Add them with "
+                      f"[bold]quorum project --create[/bold] members, or fill the "
+                      "address in by hand.")
+
+    if not apply_changes:
+        console.print("\n[yellow]Dry run - nothing added to Gmail.[/yellow] "
+                      "Re-run with [bold]--apply[/bold] to put these in your drafts.")
+        return
+
+    google = credentials_status()
+    if not google.ready:
+        console.print(f"\n[red]Cannot reach Gmail: {google.message}[/red]")
+        console.print("Run [bold]quorum auth[/bold] first.")
+        raise typer.Exit(1)
+
+    try:
+        service = get_gmail_service()
+    except GoogleAuthError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    sendable = [d for d in written if d.addressed]
+    if not sendable:
+        console.print("[yellow]Nothing to add - none of them have an address.[/yellow]")
+        return
+
+    gate = ApprovalGate(require_approval=settings.require_approval)
+    action = PlannedAction(
+        commitment_id=f"drafts:{found.meta.id}",
+        action=ActionType.SCHEDULE,
+        reason=f"{len(sendable)} Gmail draft(s)",
+        priority=1,
+    )
+    pending = gate.propose(
+        action, f"Create {len(sendable)} Gmail draft(s)",
+        body="\n\n---\n\n".join(d.render() for d in sendable),
+    )
+
+    console.print(f"\n[bold]About to create {len(sendable)} draft(s)[/bold] in your "
+                  "Gmail. [dim]They are not sent - you send them yourself.[/dim]")
+    if not typer.confirm("Create them?", default=False):
+        gate.reject(pending.id, "declined at the prompt")
+        console.print("[yellow]Nothing created.[/yellow]")
+        return
+
+    transport = GmailDraftTransport(GmailDrafts(service), sendable)
+    gate.execute(pending.id, gate.approve(pending.id), transport)
+    result = transport.result
+
+    console.print(f"[green]{result.created} draft(s) in Gmail.[/green] "
+                  "Open Gmail, read them, send the ones you want.")
+    if result.skipped:
+        console.print(f"[dim]{result.skipped} skipped for having no address.[/dim]")
+    for failure in result.failed:
+        console.print(f"  [red]failed:[/red] {failure}")
+
+
+@app.command()
+def week(
+    project_name: str = typer.Option("", "--project", help="Which project."),
+    days: int = typer.Option(7, help="How far back to look."),
+    out: str = typer.Option("", help="Write the report to this markdown file."),
+) -> None:
+    """What changed between meetings.
+
+    Every meeting tool summarises a meeting. This summarises the gap - and the
+    gap is where the interesting things happen: a decision reversed across two
+    meetings, a commitment that quietly evaporated, work delivered without
+    anyone saying so. None of it is visible in a single transcript.
+
+    Costs nothing: every line is a query over the ledger, not a model call.
+    """
+    from datetime import date as _date
+
+    from quorum.tracking import build_report
+
+    setup_logging("WARNING")
+    _, found = _load_project(project_name)
+
+    report = build_report(found.ledger, found.meta.name, until=_date.today(), days=days)
+
+    console.print()
+    show(report.as_markdown())
+
+    if report.is_quiet:
+        console.print("[dim]Nothing moved. That is a real answer, not an empty one - "
+                      "it means no commitment slipped, reversed or lapsed.[/dim]")
+
+    if out:
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).write_text(report.as_markdown(), encoding="utf-8")
+        console.print(f"[green]Written to {out}[/green]")
+    elif not report.is_quiet:
+        console.print(f"[dim]Save it: quorum week --project {found.meta.id} "
+                      f"--out runs/week.md[/dim]")
+
+
+@app.command()
+def triage(
+    project_name: str = typer.Option("", "--project", help="Which project."),
+    skip_tentative: bool = typer.Option(True, help="Only ask about firm commitments."),
+) -> None:
+    """Fill in the deadlines nobody stated out loud.
+
+    The planner flags a commitment with no date and cannot chase it; the
+    calendar lists it and cannot schedule it. Neither could ever ask you. This
+    is the part that asks - it shows the words that created the obligation, and
+    you say when it is due.
+    """
+    from datetime import date as _date
+
+    from quorum.agents.dates import resolve_deadline
+    from quorum.models import CommitmentStatus, CommitmentStrength, DeadlineResolution
+
+    setup_logging("WARNING")
+    _, found = _load_project(project_name)
+    ledger = found.ledger
+    today = _date.today()
+
+    undated = [c for c in ledger.open_commitments() if c.deadline.resolved is None]
+    if skip_tentative:
+        undated = [c for c in undated if c.strength is CommitmentStrength.FIRM]
+
+    if not undated:
+        console.print(
+            f"[green]Every open commitment on {found.meta.name} has a date.[/green]"
+        )
+        return
+
+    console.print(f"[bold]{len(undated)} commitment(s) with no deadline.[/bold]")
+    console.print(
+        "[dim]Enter a date, or press Enter to leave it. "
+        "'skip' to stop, 'drop' to abandon the commitment.[/dim]"
+    )
+    console.print()
+
+    filled = 0
+    dropped = 0
+    for index, commitment in enumerate(undated, start=1):
+        owner = commitment.assignee.display_name or "unassigned"
+        console.print(f"[bold]{index}/{len(undated)}[/bold]  {safe(commitment.description)}")
+        console.print(f"        [dim]{safe(owner)}[/dim]")
+        for evidence in commitment.evidence[:1]:
+            # The words are the point. "When is this due" is a question you can
+            # only answer if you are reminded what was actually said about it.
+            said = safe(evidence.quote.strip())
+            console.print(f"        [dim]said: {said}[/dim]")
+        if commitment.deadline.raw_text:
+            spoken = safe(commitment.deadline.raw_text)
+            console.print(
+                f"        [dim]timing as spoken: {spoken} (could not be resolved)[/dim]"
+            )
+
+        try:
+            answer = console.input("        due > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            console.print("[dim]Stopped.[/dim]")
+            break
+
+        if not answer:
+            console.print("        [dim]left without a date[/dim]")
+            console.print()
+            continue
+        if answer.lower() in ("skip", "stop", "q", "quit"):
+            break
+        if answer.lower() in ("drop", "abandon", "cancel"):
+            commitment.status = CommitmentStatus.DROPPED
+            commitment.resolution_note = f"dropped during triage on {today}"
+            dropped += 1
+            console.print("        [magenta]dropped[/magenta]")
+            console.print()
+            continue
+
+        resolved = resolve_deadline(answer, today)
+        if resolved.value is None:
+            # Refused rather than guessed: a wrong date silently produces a
+            # calendar reminder on the wrong day, which is worse than none.
+            console.print(
+                f"        [red]Could not read {answer!r} as a date.[/red] "
+                "Try 'next Friday' or 2026-09-01. Left without a date."
+            )
+            console.print()
+            continue
+
+        commitment.record_deadline_change(
+            resolved.value, on=today, source="triage", note=answer
+        )
+        commitment.deadline.resolved = resolved.value
+        commitment.deadline.raw_text = answer
+        commitment.deadline.method = (
+            resolved.method
+            if resolved.method is not DeadlineResolution.NONE
+            else DeadlineResolution.EXPLICIT
+        )
+        commitment.deadline.confidence = resolved.confidence
+        filled += 1
+        console.print(f"        [green]{resolved.value.isoformat()}[/green]")
+        console.print()
+
+    found.save_ledger()
+    remaining = len([c for c in ledger.open_commitments() if c.deadline.resolved is None])
+    console.print(
+        f"[green]{filled} dated[/green]"
+        + (f", {dropped} dropped" if dropped else "")
+        + f". {remaining} still without a date."
+    )
+    if filled:
+        console.print(f"  Next: [bold]quorum calendar --project {found.meta.id}[/bold]")
 
 
 @app.command()
@@ -564,7 +919,7 @@ def done(
     if len(what.strip()) < 4 or not words:
         console.print(f"[red]{what!r} is too vague to identify a commitment.[/red] Open:")
         for item in candidates[:8]:
-            console.print(f"  - {item.description}")
+            console.print(f"  - {safe(item.description)}")
         raise typer.Exit(1)
 
     scored = sorted(
@@ -575,7 +930,7 @@ def done(
     if best_score < 55:
         console.print(f"[red]Nothing matches {what!r}.[/red] Open commitments:")
         for _, item in scored[:5]:
-            console.print(f"  - {item.description}")
+            console.print(f"  - {safe(item.description)}")
         raise typer.Exit(1)
 
     # Ambiguity is resolved by asking, not by picking. Closing the wrong
@@ -583,7 +938,7 @@ def done(
     if len(scored) > 1 and scored[1][0] >= best_score - 5:
         console.print(f"[yellow]Ambiguous - {what!r} matches several:[/yellow]")
         for score, item in scored[:3]:
-            console.print(f"  - {item.description} [dim]({score:.0f})[/dim]")
+            console.print(f"  - {safe(item.description)} [dim]({score:.0f})[/dim]")
         console.print("Be more specific.")
         raise typer.Exit(1)
 
@@ -594,6 +949,486 @@ def done(
     verb = "Dropped" if drop else "Closed"
     console.print(f"[green]{verb}:[/green] {best.description}")
     console.print(f"[dim]{len(ledger.open_commitments())} still open.[/dim]")
+
+
+@app.command()
+def name(
+    which: str = typer.Argument("", help="Meeting id or words from its title."),
+    handle: str = typer.Argument("", help="The short name to give it."),
+    project_name: str = typer.Option("", "--project", help="Which project."),
+) -> None:
+    """Give a meeting or lecture a short name you can use in chat.
+
+      quorum name --project dsa                       list what is named
+      quorum name postfix kickoff --project dsa       name it @kickoff
+    """
+    from quorum.chat.naming import list_meetings, resolve_meeting, set_handle
+
+    setup_logging("WARNING")
+    workspace, found = _load_project(project_name)
+
+    if not which:
+        refs = list_meetings(found)
+        if not refs:
+            console.print("[yellow]Nothing recorded on this project yet.[/yellow]")
+            return
+        table = Table(title=f"{found.meta.name} - recordings", header_style="bold")
+        table.add_column("Handle")
+        table.add_column("Title", overflow="fold")
+        table.add_column("Date")
+        table.add_column("Kind")
+        table.add_column("Lines", justify="right")
+        for ref in refs:
+            table.add_row(
+                f"@{ref.handle}" if ref.handle else "[dim]-[/dim]",
+                safe(ref.title) or "[dim]untitled[/dim]",
+                ref.meeting_date.isoformat() if ref.meeting_date else "-",
+                ref.kind, str(ref.utterances),
+            )
+        console.print(table)
+        console.print('\n[dim]Name one: [bold]quorum name "postfix" kickoff[/bold][/dim]')
+        return
+
+    resolution = resolve_meeting(found, which)
+    if resolution.ambiguous:
+        console.print(f"[yellow]{which!r} matches several:[/yellow]")
+        for ref in resolution.candidates:
+            console.print(f"  - {safe(ref.label)} [dim]({ref.meeting_id})[/dim]")
+        console.print("Be more specific, or use the id.")
+        raise typer.Exit(1)
+    if not resolution.ok:
+        console.print(f"[red]No meeting matching {which!r}.[/red] "
+                      "Run [bold]quorum name[/bold] with no arguments to list them.")
+        raise typer.Exit(1)
+
+    if not handle:
+        console.print(f"{resolution.match.label} [dim]({resolution.match.meeting_id})[/dim]")
+        console.print("Give a second argument to name it.")
+        return
+
+    try:
+        stored = set_handle(found, resolution.match.meeting_id, handle)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    workspace.save(found)
+
+    console.print(f"[green]@{stored}[/green] -> {resolution.match.title or 'untitled'}")
+    console.print(f'  Try: [bold]quorum chat --project {found.meta.id}[/bold] '
+                  f'then ask "@{stored} what was the main point?"')
+
+
+@app.command()
+def chat(
+    question: str = typer.Argument("", help="Ask once and exit. Omit for a session."),
+    project_name: str = typer.Option("", "--project", help="Which project."),
+    meeting: str = typer.Option("", help="Start focused on one meeting or lecture."),
+    everywhere: bool = typer.Option(
+        False, "--all", help="Search every project at once. Read-only."
+    ),
+) -> None:
+    """Talk to a project: ask about its meetings, or tell it to do something.
+
+      quorum chat --project dsa
+      quorum chat "what did @kickoff decide about storage" --project team
+
+    Inside a session:
+      @handle          focus on one meeting        /meetings   list them
+      /open            open commitments            /scope      what is in focus
+      /exit            leave
+    """
+    from quorum.chat import ChatAgent, Conversation, ToolContext
+    from quorum.chat.agent import render_answer
+    from quorum.chat.naming import list_meetings, resolve_meeting
+
+    setup_logging("WARNING")
+
+    if everywhere:
+        from quorum.chat.federated import FederatedMemory, all_projects
+        from quorum.workspace import Workspace
+
+        workspace = Workspace()
+        projects = all_projects(workspace)
+        if not projects:
+            console.print("[yellow]Nothing recorded in any project yet.[/yellow]")
+            raise typer.Exit(1)
+        # One embedder for every store. Scores from two indexes are only
+        # comparable if the same model produced them, and it loads ~100 MB once
+        # instead of once per project.
+        found = projects[0]
+        context = ToolContext(
+            project=found, workspace=workspace,
+            memory=FederatedMemory(projects), federated=True,
+        )
+    else:
+        workspace, found = _load_project(project_name)
+        context = ToolContext(project=found, workspace=workspace)
+
+    conversation = Conversation()
+    if meeting:
+        resolution = resolve_meeting(found, meeting)
+        if not resolution.ok:
+            console.print(f"[red]No meeting matching {meeting!r}.[/red]")
+            raise typer.Exit(1)
+        conversation.scope_meeting = resolution.match.handle or resolution.match.meeting_id
+        context.scope_meeting = conversation.scope_meeting
+
+    agent = ChatAgent(context)
+
+    def respond(text: str) -> None:
+        turn = agent.ask(text, conversation)
+
+        if turn.needs_confirmation:
+            console.print()
+            show(turn.pending.preview, style="yellow")
+            console.print()
+            if typer.confirm("Do it?", default=False):
+                result = agent.confirm(turn.pending)
+                show(result.text, style="green" if result.ok else "red")
+                turn.message = result.text
+            else:
+                console.print("[dim]Left alone.[/dim]")
+                turn.message = "declined by the user"
+            turn.pending = None
+            conversation.add(turn)
+            return
+
+        if turn.answer is not None:
+            console.print()
+            # Never through rich's markup parser: a code answer is mostly
+            # square brackets, and every one of them would be eaten.
+            show(render_answer(turn.answer))
+            for index in turn.answer.cited:
+                hit = turn.answer.hits[index - 1]
+                console.print(f"  [dim]\\[{index}] {hit.meeting_date} "
+                              f"{safe(hit.text[:90])}...[/dim]")
+        elif turn.message:
+            console.print()
+            show(turn.message)
+        if turn.tools_used:
+            console.print(f"[dim]({', '.join(turn.tools_used)})[/dim]")
+        conversation.add(turn)
+
+    if question:
+        respond(question)
+        return
+
+    if everywhere:
+        from quorum.chat.federated import all_projects
+
+        every = all_projects(workspace)
+        total = sum(len(list_meetings(p)) for p in every)
+        console.print(f"[bold]All projects[/bold] - {len(every)} project(s), "
+                      f"{total} recording(s)")
+        console.print("[dim]Read-only: use --project <name> to change anything.[/dim]")
+    else:
+        recordings = list_meetings(found)
+        console.print(f"[bold]{found.meta.name}[/bold] - {len(recordings)} recording(s), "
+                      f"{len(found.ledger.open_commitments())} open commitment(s)")
+    if conversation.scope_meeting:
+        console.print(f"[dim]Focused on @{conversation.scope_meeting}[/dim]")
+    console.print("[dim]Ask anything. /meetings to list, @handle to focus, "
+                  "/exit to leave.[/dim]\n")
+
+    while True:
+        try:
+            line = console.input("[bold cyan]you >[/bold cyan] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]Bye.[/dim]")
+            return
+        if not line:
+            continue
+        if line in ("/exit", "/quit", "exit", "quit"):
+            console.print("[dim]Bye.[/dim]")
+            return
+        if line == "/meetings":
+            for ref in list_meetings(found):
+                console.print(f"  [cyan]@{ref.handle or '(unnamed)'}[/cyan] "
+                              f"{safe(ref.title) or 'untitled'} "
+                              f"[dim]{ref.meeting_date}[/dim]")
+            continue
+        if line == "/scope":
+            console.print(f"  {conversation.scope_meeting or '[dim]whole project[/dim]'}")
+            continue
+        if line == "/open":
+            for item in found.ledger.open_commitments():
+                due = item.deadline.resolved
+                console.print(f"  {safe(item.description)} [dim]"
+                              f"{due.isoformat() if due else 'no date'}[/dim]")
+            continue
+
+        respond(line)
+
+
+@app.command()
+def auth(
+    revoke_token: bool = typer.Option(False, "--revoke", help="Forget the stored token."),
+    status_only: bool = typer.Option(False, "--status", help="Report without logging in."),
+) -> None:
+    """Authorise Google Calendar. Opens a browser once, then stores a token."""
+    from quorum.integrations import (
+        CALENDAR_SCOPES,
+        GoogleAuthError,
+        authorise,
+        credentials_status,
+    )
+    from quorum.integrations import revoke as revoke_stored
+
+    setup_logging("WARNING")
+    ensure_dirs()
+
+    if revoke_token:
+        if revoke_stored():
+            console.print("[green]Stored token deleted.[/green]")
+            console.print(
+                "[dim]The grant itself still exists. Remove it at "
+                "https://myaccount.google.com/permissions[/dim]"
+            )
+        else:
+            console.print("[dim]No stored token to delete.[/dim]")
+        return
+
+    current = credentials_status()
+    console.print(f"Google: [bold]{current.message}[/bold]")
+    console.print(f"[dim]Scope requested: {', '.join(CALENDAR_SCOPES)}[/dim]")
+    if status_only or current.ready:
+        if current.ready:
+            console.print("[dim]Re-run with --revoke to sign out.[/dim]")
+        return
+
+    console.print("\nA browser window will open for Google sign-in.")
+    try:
+        authorise(interactive=True)
+    except GoogleAuthError as exc:
+        console.print(f"\n[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[green]Authorised.[/green] {credentials_status().message}")
+    console.print("  Next: [bold]quorum calendar --project <name>[/bold]")
+
+
+@app.command()
+def calendar(
+    project_name: str = typer.Option("", "--project", help="Which project."),
+    apply_changes: bool = typer.Option(False, "--apply", help="Actually write the events."),
+    tentative: bool = typer.Option(False, help="Include tentative commitments too."),
+    calendar_id: str = typer.Option("", help="Target calendar. Defaults to your primary."),
+    keep_resolved: bool = typer.Option(
+        False, help="Leave events for commitments that are now closed."
+    ),
+) -> None:
+    """Put deadlines in your calendar, with reminders before each one.
+
+    Runs as a dry run by default: it prints exactly what it would change and
+    writes nothing. `--apply` performs it, behind the approval gate.
+    """
+    from datetime import date as _date
+
+    from quorum.execution import ApprovalGate, CalendarConfig, CalendarSync, ChangeKind
+    from quorum.execution.calendar import CalendarTransport
+    from quorum.integrations import GoogleAuthError, credentials_status, get_calendar_service
+    from quorum.tracking import ActionType, PlannedAction
+
+    setup_logging("WARNING")
+    settings = get_settings()
+    _, found = _load_project(project_name)
+
+    config = CalendarConfig(
+        calendar_id=calendar_id or settings.calendar_id,
+        reminder_days=settings.reminder_days(),
+        reminder_hour=settings.reminder_hour,
+        include_tentative=tentative,
+        delete_resolved=not keep_resolved,
+    )
+
+    google = credentials_status()
+    service = None
+    if google.ready:
+        try:
+            service = get_calendar_service()
+        except GoogleAuthError as exc:
+            console.print(f"[yellow]{exc}[/yellow]")
+    elif apply_changes:
+        console.print(f"[red]Cannot write: {google.message}[/red]")
+        console.print("Run [bold]quorum auth[/bold] first.")
+        raise typer.Exit(1)
+
+    sync = CalendarSync(service, config)
+    plan = sync.plan(found.ledger, _date.today())
+
+    leads = ", ".join(f"{d}d" for d in config.reminder_days)
+    console.print(f"[bold]{found.meta.name}[/bold] -> calendar {config.calendar_id} "
+                  f"[dim](reminders {leads} before, at {config.reminder_hour:02d}:00)[/dim]\n")
+
+    if plan.is_empty and not plan.undated:
+        console.print("[green]Calendar already matches the ledger.[/green]")
+        return
+
+    if plan.writes:
+        table = Table(header_style="bold")
+        table.add_column("Change")
+        table.add_column("Due")
+        table.add_column("Commitment", overflow="fold")
+        table.add_column("Why", overflow="fold")
+        colour = {
+            ChangeKind.CREATE: "green", ChangeKind.UPDATE: "yellow", ChangeKind.DELETE: "magenta"
+        }
+        for change in plan.writes:
+            table.add_row(
+                f"[{colour[change.kind]}]{change.kind.value}[/{colour[change.kind]}]",
+                change.due.isoformat() if change.due else "-",
+                safe(change.title),
+                safe(change.reason),
+            )
+        console.print(table)
+
+    unchanged = len(plan.of_kind(ChangeKind.UNCHANGED))
+    if unchanged:
+        console.print(f"[dim]{unchanged} event(s) already correct.[/dim]")
+
+    if plan.undated:
+        # These are exactly the commitments the planner flags and cannot chase.
+        # Naming them here is the difference between "the agent ignored it" and
+        # a question the user can answer.
+        console.print(f"\n[yellow]{len(plan.undated)} commitment(s) have no deadline[/yellow] "
+                      "and cannot be scheduled:")
+        for item in plan.undated:
+            owner = item.assignee.display_name or "unassigned"
+            console.print(f"  - {safe(item.description)} [dim]({safe(owner)})[/dim]")
+
+    if plan.is_empty:
+        return
+
+    if not apply_changes:
+        console.print(f"\n[yellow]Dry run - nothing written.[/yellow] {plan.summary_line()}.")
+        console.print("Re-run with [bold]--apply[/bold] to make these changes.")
+        return
+
+    if service is None:
+        console.print("\n[red]No calendar service available.[/red] Run [bold]quorum auth[/bold].")
+        raise typer.Exit(1)
+
+    # One approval for the whole plan, not one per event. The human reads a
+    # complete list of what will change and consents to that list; twenty
+    # separate prompts would be approval fatigue, which is how gates end up
+    # being clicked through without being read.
+    gate = ApprovalGate(require_approval=settings.require_approval)
+    action = PlannedAction(
+        commitment_id=f"calendar:{found.meta.id}",
+        action=ActionType.SCHEDULE,
+        reason=plan.summary_line(),
+        priority=1,
+    )
+    pending = gate.propose(action, f"Calendar sync: {plan.summary_line()}", body=plan.render())
+
+    console.print(f"\n[bold]About to change {len(plan.writes)} event(s)[/bold] "
+                  f"on {config.calendar_id}.")
+    if not typer.confirm("Apply?", default=False):
+        gate.reject(pending.id, "declined at the prompt")
+        console.print("[yellow]Nothing written.[/yellow]")
+        return
+
+    transport = CalendarTransport(sync, plan)
+    token = gate.approve(pending.id)
+    gate.execute(pending.id, token, transport)
+    result = transport.result
+
+    console.print(
+        f"[green]Done.[/green] {result.created} added, {result.updated} updated, "
+        f"{result.deleted} removed."
+    )
+    for failure in result.failed:
+        console.print(f"  [red]failed:[/red] {failure}")
+
+
+@app.command()
+def resume(
+    meeting_id: str = typer.Argument("", help="Which run to continue."),
+    list_only: bool = typer.Option(False, "--list", help="Show interrupted runs and stop."),
+) -> None:
+    """Continue a pipeline run that died partway.
+
+    Free-tier quota walls kill long runs. The pipeline checkpoints after every
+    stage, so the transcription and any completed extraction survive - this
+    restarts at the stage that failed rather than at the beginning.
+    """
+    from quorum.pipeline import IngestGraph, RunStatus, interrupted_runs
+
+    setup_logging("WARNING")
+    runs = interrupted_runs()
+
+    if list_only or not meeting_id:
+        if not runs:
+            console.print("[green]No interrupted runs.[/green]")
+            return
+        table = Table(title="Interrupted runs", header_style="bold")
+        table.add_column("Meeting")
+        table.add_column("Title", overflow="fold")
+        table.add_column("Date")
+        table.add_column("Done")
+        table.add_column("Next")
+        for run in runs:
+            table.add_row(
+                run.meeting_id, safe(run.title) or "[dim]untitled[/dim]",
+                run.meeting_date.isoformat() if run.meeting_date else "-",
+                ", ".join(run.completed_stages) or "[dim]none[/dim]",
+                run.next_stage,
+            )
+        console.print(table)
+        if not list_only:
+            console.print("\n[dim]Continue one: [bold]quorum resume <meeting-id>[/bold][/dim]")
+        return
+
+    graph = IngestGraph()
+    with console.status(f"Resuming {meeting_id}..."):
+        outcome = graph.resume(meeting_id)
+
+    if outcome.status is RunStatus.NOT_FOUND:
+        console.print(f"[red]{outcome.error}[/red]")
+        console.print("Run [bold]quorum resume --list[/bold] to see what can be continued.")
+        raise typer.Exit(1)
+
+    if outcome.status is RunStatus.INTERRUPTED:
+        console.print(f"[yellow]Interrupted again:[/yellow] {outcome.error}")
+        console.print(f"[dim]Completed so far: "
+                      f"{', '.join(outcome.state.get('completed_stages', [])) or 'none'}. "
+                      f"Retry later - progress is kept.[/dim]")
+        raise typer.Exit(1)
+
+    record = outcome.record
+    console.print(
+        f"[green]Finished.[/green] Skipped {', '.join(outcome.resumed_from) or 'nothing'}; "
+        f"ran {', '.join(outcome.stages_run) or 'nothing'}."
+    )
+    if record is not None:
+        console.print(f"{len(record.commitments)} commitment(s), "
+                      f"{len(record.decisions)} decision(s), "
+                      f"{record.rejected_items} rejected as ungrounded.")
+        _save_resumed(record, outcome)
+
+
+def _save_resumed(record, outcome) -> None:
+    """Fold a resumed run into its project, if it had one."""
+    from quorum.workspace import Workspace
+
+    project_id = outcome.state.get("project_id")
+    if not project_id:
+        console.print("[dim]No project on this run - nothing saved.[/dim]")
+        return
+
+    workspace = Workspace()
+    project = workspace.get(project_id)
+    if project is None:
+        console.print(f"[yellow]Project {project_id!r} no longer exists - not saved.[/yellow]")
+        return
+
+    from quorum.models import Transcript
+
+    transcript = Transcript.model_validate(outcome.state["transcript"])
+    project.add_meeting(record, transcript)
+    workspace.save(project)
+    console.print(f"[green]Saved to {project.meta.name}.[/green] "
+                  f"{len(project.ledger.open_commitments())} open commitment(s).")
 
 
 @app.command()
@@ -623,11 +1458,6 @@ def record(
     import time as _time
     from datetime import date as _date
 
-    from quorum.agents.embedding import LexicalEmbedder
-    from quorum.agents.extractor import Extractor
-    from quorum.agents.resolver import Resolver
-    from quorum.agents.segmenter import Segmenter
-    from quorum.agents.verifier import GroundingVerifier
     from quorum.capture.audio import DualRecorder, RecorderConfig
     from quorum.capture.echo import suppress_echo
     from quorum.capture.speakers import RemoteSpeakerAttributor, SpeakerRoster, build_transcript
@@ -691,14 +1521,16 @@ def record(
         console.print(f"[red]Could not start recording: {exc}[/red]")
         raise typer.Exit(1)
 
-    deadline = _time.time() + minutes * 60 if minutes else None
+    started = _time.time()
+    deadline = started + minutes * 60 if minutes else None
     console.print("[green]Recording.[/green] Press Ctrl+C to stop.\n")
     try:
         while deadline is None or _time.time() < deadline:
             _time.sleep(1.0)
-            captured = recorder.captured_seconds
+            # Elapsed wall clock. `captured_seconds` sums the microphone and
+            # loopback streams, so it reports roughly double the real duration.
             console.print(
-                f"  captured {captured / 60:.1f} min, "
+                f"  recording {(_time.time() - started) / 60:.1f} min, "
                 f"{recorder.chunks.qsize()} chunk(s) queued, "
                 f"{recorder.skipped_silent} silent chunk(s) skipped",
                 end="\r",
@@ -748,15 +1580,32 @@ def record(
             RemoteSpeakerAttributor().attribute(transcript, people)
 
     console.print(f"\n[bold]Transcript:[/bold] {len(transcript.utterances)} utterances\n")
-    console.print(transcript.as_dialogue(0, min(8, len(transcript.utterances))))
+    show(transcript.as_dialogue(0, min(8, len(transcript.utterances))))
     if len(transcript.utterances) > 8:
         console.print(f"[dim]... and {len(transcript.utterances) - 8} more[/dim]")
 
+    from quorum.pipeline import IngestGraph, RunStatus
+
+    # Through the checkpointed graph rather than four calls in a row. The audio
+    # is already spent by this point - a quota wall during extraction used to
+    # throw away the transcription along with it.
     with console.status("Extracting commitments..."):
-        segmented = Segmenter(embedder=LexicalEmbedder()).segment(transcript)
-        extracted = Extractor().extract(transcript, segmented)
-        commitments, report = GroundingVerifier().verify(extracted.commitments, transcript)
-        Resolver().resolve(commitments, transcript)
+        outcome = IngestGraph().run(
+            transcript, project_id=active_project.meta.id if active_project else None
+        )
+
+    if outcome.status is RunStatus.INTERRUPTED:
+        console.print(f"\n[yellow]Extraction stopped:[/yellow] {outcome.error}")
+        console.print(
+            f"[dim]Completed: "
+            f"{', '.join(outcome.state.get('completed_stages', [])) or 'nothing'}. "
+            f"The transcript is checkpointed - nothing recorded is lost.[/dim]"
+        )
+        console.print(f"  Continue later: [bold]quorum resume {transcript.meeting_id}[/bold]")
+        raise typer.Exit(1)
+
+    meeting_record = outcome.record
+    commitments = meeting_record.commitments
 
     table = Table(title="\nCommitments found", header_style="bold")
     table.add_column("Owner")
@@ -765,16 +1614,34 @@ def record(
     table.add_column("Strength")
     for commitment in commitments:
         table.add_row(
-            commitment.assignee.display_name or f"[dim]{commitment.assignee.raw_mention}[/dim]",
-            commitment.description,
+            safe(commitment.assignee.display_name)
+            or f"[dim]{safe(commitment.assignee.raw_mention or '')}[/dim]",
+            safe(commitment.description),
             commitment.deadline.resolved.isoformat() if commitment.deadline.resolved else "-",
             commitment.strength.value,
         )
     console.print(table)
     console.print(
-        f"[dim]{report.rejected} item(s) rejected as ungrounded. "
+        f"[dim]{meeting_record.rejected_items} item(s) rejected as ungrounded. "
         f"Nothing was sent - the approval gate is enabled.[/dim]"
     )
+
+    # The summary, which the ledger cannot supply. Costs a call per segment plus
+    # one synthesis, and runs after extraction so a failure here still leaves the
+    # commitments - the part the whole project is about.
+    from quorum.analysis.meeting import MeetingSummariser
+
+    try:
+        with console.status("Writing the summary..."):
+            digest = MeetingSummariser().summarise(transcript, segments_of(outcome))
+        meeting_record.summary = digest.summary
+    except Exception as exc:  # noqa: BLE001 - a summary is worth less than the ledger
+        console.print(f"[dim]Could not summarise this meeting: {exc}[/dim]")
+        digest = None
+
+    if digest is not None and digest.summary:
+        console.print()
+        show(digest.as_markdown(meeting_record))
 
     if active_project is None:
         console.print(
@@ -783,39 +1650,64 @@ def record(
         )
         return
 
-    from quorum.memory import ProjectMemory
-    from quorum.models import MeetingRecord
+    from quorum.chat.naming import register_meeting
 
-    updates, _ = GroundingVerifier().verify(extracted.status_updates, transcript)
-    decisions, _ = GroundingVerifier().verify(extracted.decisions, transcript)
-    meeting_record = MeetingRecord(
-        meeting_id=transcript.meeting_id, project_id=active_project.meta.id,
-        meeting_date=transcript.meeting_date, title=title,
-        commitments=commitments, decisions=decisions, status_updates=updates,
-        rejected_items=report.rejected,
-    )
-
+    meeting_record.title = title
     before = len(active_project.ledger.open_commitments())
     active_project.add_meeting(meeting_record, transcript)
+    handle = register_meeting(active_project, transcript)
     workspace_ref, _ = _load_project(active_project.meta.id)
     workspace_ref.save(active_project)
 
-    indexed = 0
-    try:
-        indexed = ProjectMemory(active_project.memory_dir).index_meeting(
-            meeting_record, transcript
+    if digest is not None and digest.summary:
+        notes_path = free_path(
+            RUNS_DIR / "notes", f"{transcript.meeting_date}_{transcript.meeting_id}", ".md"
         )
-    except Exception as exc:  # noqa: BLE001 - memory is an optimisation, never a blocker
-        console.print(f"[dim]Could not index into project memory: {exc}[/dim]")
+        notes_path.parent.mkdir(parents=True, exist_ok=True)
+        notes_path.write_text(digest.as_markdown(meeting_record), encoding="utf-8")
+        console.print(f"[green]Minutes saved to {notes_path}[/green]")
 
     after = len(active_project.ledger.open_commitments())
     console.print(
         f"\n[green]Saved to {active_project.meta.name}.[/green] "
         f"Open commitments: {before} -> {after}. "
-        f"{len(updates)} status update(s) applied, {indexed} item(s) indexed."
+        f"{len(meeting_record.status_updates)} status update(s) applied, "
+        f"{outcome.state.get('indexed', 0)} item(s) indexed."
     )
-    console.print(f"  Next: [bold]quorum today --project {active_project.meta.id}[/bold]")
 
+    undated = [c for c in commitments if c.deadline.resolved is None and c.is_actionable]
+    emails = _communication_count(commitments)
+
+    console.print(f"  Next: [bold]quorum today --project {active_project.meta.id}[/bold]")
+    if undated:
+        console.print(f"        [bold]quorum triage --project {active_project.meta.id}[/bold]"
+                      f" - {len(undated)} commitment(s) need a deadline from you")
+    if emails:
+        console.print(f"        [bold]quorum drafts --project {active_project.meta.id}[/bold]"
+                      f" - {emails} email(s) were promised in this meeting")
+    if any(c.deadline.resolved for c in commitments):
+        console.print(f"        [bold]quorum calendar --project {active_project.meta.id}"
+                      f"[/bold] to put the deadlines in your calendar")
+    console.print(f"        [bold]quorum chat --project {active_project.meta.id}[/bold] "
+                  f"to ask about it - this one is [cyan]@{handle}[/cyan]")
+
+
+def _communication_count(commitments) -> int:
+    from quorum.execution import find_communications
+
+    return len(find_communications(commitments))
+
+
+def segments_of(outcome):
+    """Segments the pipeline already produced, rebuilt from its state.
+
+    Re-segmenting would be cheap but would not necessarily agree with what the
+    extractor saw, and two different segmentations of one meeting is exactly the
+    kind of quiet inconsistency that is hard to notice and hard to explain.
+    """
+    from quorum.models import Segment
+
+    return [Segment.model_validate(s) for s in outcome.state.get("segments", [])]
 
 def _analyse_lecture(transcript, active_project, out: str = "") -> None:
     """Notes, disk, index. Shared by live capture and transcript re-analysis."""
@@ -835,8 +1727,19 @@ def _analyse_lecture(transcript, active_project, out: str = "") -> None:
     with console.status(f"Taking notes across {len(topics)} topic(s)..."):
         notes = LectureAnalyser().analyse(transcript, topics)
 
+    # Local, free, and not derived from the talk at all - read off how it was
+    # watched. Never fatal: a lecture watched straight through simply has none.
+    try:
+        from quorum.analysis.replays import find_replays
+
+        notes.replays = find_replays(transcript)
+    except Exception as exc:  # noqa: BLE001 - a bonus section must not cost the notes
+        console.print(f"[dim]Could not check for replayed sections: {exc}[/dim]")
+
     console.print()
-    console.print(notes.as_markdown())
+    # Study notes are full of code, subscripts and formulae. The saved .md file
+    # was always correct; only this preview was being mangled.
+    show(notes.as_markdown())
     console.print(
         f"\n[dim]{notes.llm_calls} calls, {notes.total_tokens:,} tokens, "
         f"{notes.latency_s:.0f}s, cost $0.00"
@@ -860,17 +1763,34 @@ def _analyse_lecture(transcript, active_project, out: str = "") -> None:
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_path.write_text(transcript.model_dump_json(indent=2), encoding="utf-8")
     console.print(f"[green]Transcript saved to {transcript_path}[/green]")
+    # Timestamps are positions in the recording. If the session was not linear -
+    # a skip, a replay, a speed change - they do not correspond to the video,
+    # and searching the words is the only navigation that still works.
+    console.print(
+        "[dim]Times are positions in this recording. If you skipped or replayed "
+        "parts, find a moment by its words instead:\n"
+        '  quorum transcript <name> --search "a phrase you remember"[/dim]'
+    )
 
     if active_project is not None:
+        from quorum.chat.naming import register_meeting
         from quorum.memory import ProjectMemory
+        from quorum.workspace import Workspace
 
         indexed = ProjectMemory(active_project.memory_dir).index_notes(
             transcript.meeting_id, notes.title, _date.today(), notes
         )
+        # Nameable straight away. Requiring `quorum name` first would mean the
+        # common case - watch one lecture, ask about it - needs a second command
+        # before the first question can be asked.
+        handle = register_meeting(active_project, transcript)
+        Workspace().save(active_project)
         console.print(
-            f"[green]Indexed {indexed} item(s) into {active_project.meta.name}.[/green] "
-            f"Ask questions with: [bold]quorum ask \"...\" "
-            f"--project {active_project.meta.id}[/bold]"
+            f"[green]Indexed {indexed} item(s) into {active_project.meta.name}[/green] "
+            f"as [cyan]@{handle}[/cyan]."
+        )
+        console.print(
+            f"  Ask about it: [bold]quorum chat --project {active_project.meta.id}[/bold]"
         )
 
 
@@ -882,10 +1802,14 @@ def learn(
         "", "--project", help="Save notes here so `quorum ask` can search them."
     ),
     system_only: bool = typer.Option(
-        True, help="Capture only the video's audio, not your microphone."
+        True, help="Capture the video's audio only. Use --no-system-only for a lecture in a room, where the sound reaches the microphone instead."
     ),
     from_transcript: str = typer.Option(
         "", help="Re-analyse a saved transcript instead of recording again."
+    ),
+    speed: float = typer.Option(
+        1.0, help="Constant playback speed, so timestamps map back to the video. "
+                  "Only valid if you do not seek or change speed part-way."
     ),
     out: str = typer.Option("", help="Write the notes to this markdown file."),
 ) -> None:
@@ -944,7 +1868,14 @@ def learn(
         _analyse_lecture(transcript, active_project, out)
         return
 
-    console.print("[bold]Listening.[/bold] Start the video now if you have not.")
+    # The instruction depends on where the sound is coming from. "Start the
+    # video" is confusing advice to someone sitting in a lecture theatre.
+    if system_only:
+        console.print("[bold]Listening to your speakers.[/bold] "
+                      "Start the video now if you have not.")
+    else:
+        console.print("[bold]Listening to your microphone.[/bold] "
+                      "Point the laptop towards the speaker.")
     console.print("[dim]Press Ctrl+C when the lecture ends.[/dim]\n")
 
     recorder = DualRecorder(RecorderConfig())
@@ -954,12 +1885,16 @@ def learn(
         console.print(f"[red]Could not start recording: {exc}[/red]")
         raise typer.Exit(1)
 
-    deadline = _time.time() + minutes * 60 if minutes else None
+    started = _time.time()
+    deadline = started + minutes * 60 if minutes else None
     try:
         while deadline is None or _time.time() < deadline:
             _time.sleep(1.0)
+            # Wall clock, not `captured_seconds` - that sums both channels, so
+            # it read as double the real elapsed time and looked like half the
+            # lecture had gone missing.
             console.print(
-                f"  listening {recorder.captured_seconds / 60:.1f} min, "
+                f"  listening {(_time.time() - started) / 60:.1f} min, "
                 f"{recorder.skipped_silent} silent chunk(s) skipped",
                 end="\r",
             )
@@ -974,7 +1909,25 @@ def learn(
         # audio-seconds spent and removes echo as a concern entirely.
         chunks = [c for c in chunks if c.channel == SYSTEM]
     if not chunks:
-        console.print("[red]No audio captured.[/red] Was the video playing?")
+        if system_only:
+            # The default listens to the speakers, which is right for a video
+            # and captures nothing at all in a lecture hall. "Was the video
+            # playing?" is a baffling thing to be asked while sitting in a room.
+            console.print("[red]No audio captured from your speakers.[/red]")
+            console.print(
+                "If a video was playing, check the output device with "
+                "[bold]quorum record --devices[/bold]."
+            )
+            console.print(
+                "If you are in a room and the sound is not coming from this "
+                "laptop, record the microphone instead:"
+            )
+            console.print(
+                '  [bold]quorum learn --no-system-only --title "..." '
+                "--project <name>[/bold]"
+            )
+        else:
+            console.print("[red]No audio captured.[/red] Is the microphone muted?")
         raise typer.Exit(1)
 
     transcriber = WhisperTranscriber()
@@ -982,6 +1935,17 @@ def learn(
         segments = transcriber.transcribe_all(chunks)
     if not system_only:
         segments, _ = suppress_echo(segments)
+
+    if speed != 1.0:
+        from quorum.capture.transcribe import rescale
+
+        segments = rescale(segments, speed)
+        console.print(
+            f"[dim]Timestamps scaled by {speed}x to match the video. "
+            "Only correct if you watched straight through at that speed - "
+            "seeking or changing speed breaks the mapping.[/dim]"
+        )
+
     console.print(f"Transcribed {transcriber.stats.audio_seconds:.0f}s of audio "
                   f"({transcriber.stats.daily_budget_used:.1%} of today's free budget)")
 
@@ -998,11 +1962,15 @@ def learn(
 
 @app.command()
 def transcript(
-    which: str = typer.Argument("", help="Meeting id or part of its title. Omit to list."),
+    which_words: list[str] = typer.Argument(
+        None, metavar="[WHICH]...",
+        help="Meeting id or words from its title. Omit to list.",
+    ),
     project_name: str = typer.Option("", "--project", help="Which project."),
     file: str = typer.Option("", help="Read a transcript JSON directly instead."),
     style: str = typer.Option(
-        "speakers", help="speakers | timestamped | plain | markdown | srt"
+        "", help="speakers | timestamped | plain | markdown | srt. "
+                 "Defaults to timestamped for a lecture, speakers otherwise."
     ),
     speaker: str = typer.Option("", help="Only this person's lines."),
     start: str = typer.Option("", help='Skip before this time, e.g. "12:30".'),
@@ -1028,6 +1996,11 @@ def transcript(
     from quorum.models import Transcript as TranscriptModel
 
     setup_logging("WARNING")
+    # Variadic and rejoined, so a title can be typed as it reads. Requiring
+    # quotes meant copying a title straight off the listing above failed with
+    # "unexpected extra argument", which is a confusing answer to an obvious
+    # thing to try.
+    which = " ".join(which_words or []).strip()
 
     if file:
         path = Path(file)
@@ -1057,7 +2030,7 @@ def transcript(
         table.add_column("date")
         table.add_column("lines", justify="right")
         for item in available:
-            table.add_row(item.meeting_id, item.title or "-",
+            table.add_row(item.meeting_id, safe(item.title) or "-",
                           item.meeting_date.isoformat(), str(len(item.utterances)))
         console.print(table)
         console.print("\n[dim]Print one: quorum transcript <id or title words>[/dim]")
@@ -1088,9 +2061,13 @@ def transcript(
         console.print(f"[dim]{summary['utterances']} lines, {summary['words']} words[/dim]")
         return
 
+    # Labelling every line of a one-voice lecture "Remote participant" is noise
+    # around the words you actually came for. The placeholder speaker means the
+    # roster cannot answer this - only who spoke can.
+    chosen_style = style or ("timestamped" if chosen.is_monologue else "speakers")
     try:
         text = render(
-            chosen, Style(style), speaker=speaker or None,
+            chosen, Style(chosen_style), speaker=speaker or None,
             start_s=parse_time(start), end_s=parse_time(end), search=search or None,
         )
     except ValueError as exc:
@@ -1146,11 +2123,12 @@ def ask(
             prompt, tier=ModelTier.BALANCED, max_tokens=1024, purpose="ask"
         )
 
-    console.print(f"\n{response.text}\n")
-    console.print("[dim]Sources:[/dim]")
+    console.print()
+    show(response.text)
+    console.print("\n[dim]Sources:[/dim]")
     for index, hit in enumerate(hits, start=1):
-        console.print(f"  [dim][{index}] {hit.meeting_date} ({hit.score:.2f}) "
-                      f"{hit.text[:90]}...[/dim]")
+        console.print(f"  [dim]\\[{index}] {hit.meeting_date} ({hit.score:.2f}) "
+                      f"{safe(hit.text[:90])}...[/dim]")
 
 
 @app.command()
@@ -1158,6 +2136,9 @@ def ami(
     path: str = typer.Option("data/ami", help="Where the corpus was unpacked."),
     limit: int = typer.Option(5, help="Meetings to evaluate. Each costs quota."),
     threshold: float = typer.Option(55.0, help="Fuzzy match threshold."),
+    verbose: bool = typer.Option(
+        True, help="Show what matched, what was missed and what was extra."
+    ),
     out: str = typer.Option("", help="Write the report to this JSON path."),
 ) -> None:
     """Evaluate extraction against the real AMI corpus.
@@ -1218,9 +2199,22 @@ def ami(
         results.append(result)
         console.print(
             f"  {meeting.meeting_id}: {len(meeting.transcript.utterances)} utterances, "
-            f"{len(meeting.actions)} annotated actions, "
+            f"{len(commitments)} extracted, {len(meeting.actions)} annotated, "
             f"P={result.scores.precision:.2f} R={result.scores.recall:.2f}"
         )
+        # A bare 0.000 is uninterpretable, and this evaluation produces one
+        # often. Seeing the annotator sentence next to what was extracted is
+        # what turns "it scored badly" into "these two disagree about what an
+        # action item is" - which is the actual finding, and not one a metric
+        # can express.
+        if verbose:
+            for predicted, annotated, score in result.matched:
+                console.print(f"      [green]hit {score:.0f}[/green]  "
+                              f"{safe(predicted[:60])}  <->  {safe(annotated[:60])}")
+            for missed in result.missed:
+                console.print(f"      [red]missed[/red]   {safe(missed[:100])}")
+            for spurious in result.spurious:
+                console.print(f"      [yellow]extra[/yellow]    {safe(spurious[:100])}")
 
     summary = summarise(results)
     table = Table(title="AMI extraction (real transcripts)", header_style="bold")
@@ -1299,7 +2293,7 @@ def demo(seed: int = 0, weeks: int = 6) -> None:
         style = colour.get(item.action, "dim")
         table.add_row(
             f"[{style}]{item.action.value}[/{style}]",
-            commitment.description if commitment else item.commitment_id,
+            safe(commitment.description if commitment else item.commitment_id),
             item.reason,
         )
     console.print(table)
@@ -1313,7 +2307,7 @@ def demo(seed: int = 0, weeks: int = 6) -> None:
                   f"[yellow]all awaiting approval, nothing sent[/yellow]")
     if digests:
         console.print(f"\n[dim]--- preview: {digests[0].recipient_email} ---[/dim]")
-        console.print(digests[0].render(ledger, as_of))
+        show(digests[0].render(ledger, as_of))
 
 
 if __name__ == "__main__":

@@ -10,9 +10,17 @@ groq>=0.13
 httpx>=0.27
 tenacity>=9.0
 
-# --- Agent orchestration ---
+# --- Agent orchestration & tracing ---
+# The ingest pipeline is a LangGraph StateGraph, checkpointed to SQLite. The
+# checkpointer is the reason for the dependency: free-tier quota walls kill long
+# runs, and resuming at the failed stage beats re-spending audio-seconds that do
+# not refill on demand.
 langgraph>=0.2.60
+langgraph-checkpoint-sqlite>=2.0
 langchain-core>=0.3
+# Optional at runtime: with no LANGSMITH_API_KEY nothing is uploaded and the
+# tracing decorators return the undecorated function.
+langsmith>=0.1.100
 
 # --- Embeddings / retrieval ---
 # fastembed is ONNX-based: no torch, ~100MB instead of ~2.5GB.
@@ -25,6 +33,13 @@ lancedb>=0.17
 # else in the call) gets captured without a bot joining the meeting. Windows
 # only; the rest of the project runs fine without it.
 PyAudioWPatch>=0.2.12; sys_platform == "win32"
+
+# --- Google Calendar (deadlines and their reminders) ---
+# Optional: everything except `quorum auth` and `quorum calendar --apply` runs
+# without these, and the sync itself plans as a dry run with no credentials.
+google-api-python-client>=2.150
+google-auth-oauthlib>=1.2
+google-auth-httplib2>=0.2
 
 # --- Utilities ---
 rapidfuzz>=3.10

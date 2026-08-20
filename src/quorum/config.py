@@ -37,15 +37,31 @@ class Settings(BaseSettings):
     groq_api_key: str | None = Field(default=None, alias="GROQ_API_KEY")
 
     # --- Tracing ---------------------------------------------------------
-    langfuse_public_key: str | None = Field(default=None, alias="LANGFUSE_PUBLIC_KEY")
-    langfuse_secret_key: str | None = Field(default=None, alias="LANGFUSE_SECRET_KEY")
-    langfuse_host: str = Field(default="https://cloud.langfuse.com", alias="LANGFUSE_HOST")
+    langsmith_api_key: str | None = Field(default=None, alias="LANGSMITH_API_KEY")
+    langsmith_project: str = Field(default="quorum", alias="LANGSMITH_PROJECT")
+    langsmith_endpoint: str = Field(
+        default="https://api.smith.langchain.com", alias="LANGSMITH_ENDPOINT"
+    )
+    langsmith_tracing: bool = Field(default=True, alias="LANGSMITH_TRACING")
+    """Whether to trace when a key is present. Defaults on, because tracing you
+    have to remember to enable is tracing you do not have when it would have
+    helped. With no key set this is inert - nothing is uploaded and nothing is
+    slowed down."""
 
     # --- Reality-verification layer --------------------------------------
     github_token: str | None = Field(default=None, alias="GITHUB_TOKEN")
     google_client_secrets_file: str = Field(
         default="credentials.json", alias="GOOGLE_CLIENT_SECRETS_FILE"
     )
+    calendar_id: str = Field(default="primary", alias="QUORUM_CALENDAR_ID")
+    """Which calendar deadlines are written to. A dedicated secondary calendar
+    is worth creating - it can be toggled off in one click without losing the
+    events, which a mixed-in personal calendar cannot."""
+
+    reminder_lead_days: str = Field(default="3,1", alias="QUORUM_REMINDER_DAYS")
+    """Comma-separated lead times for deadline reminders."""
+
+    reminder_hour: int = Field(default=9, alias="QUORUM_REMINDER_HOUR")
 
     # --- Behaviour -------------------------------------------------------
     require_approval: bool = Field(default=True, alias="QUORUM_REQUIRE_APPROVAL")
@@ -55,6 +71,20 @@ class Settings(BaseSettings):
 
     cache_enabled: bool = Field(default=True, alias="QUORUM_CACHE_ENABLED")
     log_level: str = Field(default="INFO", alias="QUORUM_LOG_LEVEL")
+
+    def reminder_days(self) -> tuple[int, ...]:
+        """Parsed lead times, most distant first. Malformed entries are dropped
+        rather than crashing a sync - a typo in an env var should cost you a
+        reminder, not the run."""
+        days = []
+        for part in self.reminder_lead_days.split(","):
+            try:
+                value = int(part.strip())
+            except ValueError:
+                continue
+            if value > 0:
+                days.append(value)
+        return tuple(sorted(set(days), reverse=True)) or (3, 1)
 
     def configured_providers(self) -> list[str]:
         """Which providers actually have credentials right now."""
@@ -69,6 +99,24 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
+
+
+def free_path(directory: Path, stem: str, suffix: str) -> Path:
+    """A path that does not already exist, suffixing `-2`, `-3` as needed.
+
+    For any filename built from data a person could repeat - a date plus a
+    recipient, a date plus a title. Silently overwriting a file the user cannot
+    see is the failure mode that has already cost this project a recorded
+    lecture, and it never announces itself.
+    """
+    candidate = directory / f"{stem}{suffix}"
+    if not candidate.exists():
+        return candidate
+    for index in range(2, 1000):
+        candidate = directory / f"{stem}-{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    return directory / f"{stem}-overflow{suffix}"  # pragma: no cover
 
 
 def ensure_dirs() -> None:

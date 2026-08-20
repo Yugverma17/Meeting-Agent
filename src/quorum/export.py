@@ -142,8 +142,12 @@ def render(
 
     if style is Style.MARKDOWN:
         lines = [f"# {transcript.title or 'Transcript'}", ""]
+        # People who spoke, not the roster - which carries a placeholder
+        # participant on every live recording and so always overcounts by one.
+        present = len(transcript.speakers_present)
         lines.append(f"*{transcript.meeting_date.isoformat()}"
-                     + (f" · {len(transcript.speakers)} speakers*" if transcript.speakers else "*"))
+                     + (f" · {present} speaker{'s' if present != 1 else ''}*"
+                        if present else "*"))
         lines.append("")
         current = None
         for utterance in utterances:

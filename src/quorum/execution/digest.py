@@ -84,8 +84,11 @@ def build_digests(
     """
     grouped: dict[str, Digest] = {}
 
+    # An explicit allow-list rather than "outbound minus escalations". Outbound
+    # now also covers calendar writes, which have no recipient and would other-
+    # wise fall through to a lookup that happens to return nothing.
     for action in actions:
-        if not action.is_outbound or action.action is ActionType.ESCALATE:
+        if action.action not in (ActionType.REMIND, ActionType.NUDGE):
             continue
         commitment = ledger.by_id(action.commitment_id)
         if commitment is None or not commitment.assignee.email:

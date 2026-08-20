@@ -100,6 +100,10 @@ class LectureNotes:
     examples: list[WorkedExample] = field(default_factory=list)
     open_questions: list[str] = field(default_factory=list)
 
+    replays: list = field(default_factory=list)
+    """Stretches you played more than once. Not extracted from the talk - read
+    off how you watched it, which is knowable here and almost nowhere else."""
+
     llm_calls: int = 0
     total_tokens: int = 0
     latency_s: float = 0.0
@@ -156,6 +160,19 @@ class LectureNotes:
                 lines.append(f"- {stamp}{example.description}")
                 if example.what_it_demonstrates:
                     lines.append(f"  - *shows:* {example.what_it_demonstrates}")
+            lines.append("")
+
+        if self.replays:
+            # Placed near the top of what you revise from, because it is the
+            # only section derived from *you* rather than from the speaker.
+            lines += [
+                "## You replayed these", "",
+                "*The parts you went back over - usually the ones worth "
+                "revising first.*", "",
+            ]
+            for replay in self.replays:
+                lines.append(f"- **{replay.count}x** *(first at {replay.first_at})* "
+                             f"{replay.summary()}")
             lines.append("")
 
         if self.open_questions:

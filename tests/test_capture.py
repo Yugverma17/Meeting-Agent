@@ -401,3 +401,65 @@ def test_transcribe_all_returns_time_ordered_segments():
         [chunk(start=90.0), chunk(start=0.0), chunk(start=30.0)]
     )
     assert [s.start_s for s in segments] == [0.0, 30.0, 90.0]
+
+
+def test_each_live_recording_gets_its_own_id():
+    """Regression, and it cost a lecture.
+
+    The id was derived from the first utterance's start time, which is always
+    0.0 - so every live recording was `live_0`. The second lecture recorded into
+    a project overwrote the first: its transcript file, and its entries in the
+    vector index, which are keyed on meeting id and replaced rather than
+    appended. No error, no warning, and the earlier lecture simply gone.
+    """
+    from quorum.capture.speakers import MIC, SpeakerRoster, TranscriptSegment, build_transcript
+
+    def one(text: str):
+        return [TranscriptSegment(channel=MIC, text=text, start_s=0.0, end_s=5.0)]
+
+    first = build_transcript(one("monday's lecture"), SpeakerRoster.solo("You"))
+    second = build_transcript(one("tuesday's lecture"), SpeakerRoster.solo("You"))
+
+    assert first.meeting_id != second.meeting_id
+    assert first.utterances[0].id != second.utterances[0].id, (
+        "utterance ids must not collide either - evidence cites them"
+    )
+
+
+def test_an_explicit_meeting_id_is_still_honoured():
+    from quorum.capture.speakers import MIC, SpeakerRoster, TranscriptSegment, build_transcript
+
+    built = build_transcript(
+        [TranscriptSegment(channel=MIC, text="hello", start_s=0.0, end_s=2.0)],
+        SpeakerRoster.solo("You"), meeting_id="mtg_fixed",
+    )
+
+    assert built.meeting_id == "mtg_fixed"
+    assert built.utterances[0].id.startswith("mtg_fixed")
+
+
+def test_playback_speed_maps_timestamps_back_onto_the_video():
+    """Recording a video played at 2x captures nine minutes of audio for an
+    eighteen-minute lecture, and every timestamp then points at half its real
+    position - so a note saying "explained at 06:24" sends you to 06:24 in a
+    video where it happens at 12:48."""
+    from quorum.capture.transcribe import TranscriptSegment, rescale
+
+    captured = [
+        TranscriptSegment(channel="system", start_s=0.0, end_s=24.0, text="intro"),
+        TranscriptSegment(channel="system", start_s=384.0, end_s=400.0, text="minimal window"),
+    ]
+
+    scaled = rescale(captured, 2.0)
+
+    assert [s.start_s for s in scaled] == [0.0, 768.0], "06:24 captured is 12:48 in the video"
+    assert [s.text for s in scaled] == ["intro", "minimal window"], "text is untouched"
+
+
+def test_normal_speed_leaves_segments_exactly_alone():
+    from quorum.capture.transcribe import TranscriptSegment, rescale
+
+    captured = [TranscriptSegment(channel="system", start_s=1.0, end_s=2.0, text="x")]
+
+    assert rescale(captured, 1.0) is captured
+    assert rescale(captured, 0.0) is captured, "a nonsense speed must not zero every timestamp"

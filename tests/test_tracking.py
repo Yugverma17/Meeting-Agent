@@ -311,14 +311,32 @@ def test_actions_are_ordered_by_priority():
     assert report.actions[0].action is ActionType.ESCALATE
 
 
-def test_only_contact_actions_are_outbound():
-    outbound = {ActionType.REMIND, ActionType.NUDGE, ActionType.ESCALATE}
-    for action_type in ActionType:
-        sample = type("A", (), {})()
-        sample.action = action_type
-        from quorum.tracking.planner import PlannedAction
+def test_only_side_effecting_actions_are_outbound():
+    """Every action that leaves the process needs approval; nothing else does.
 
+    SCHEDULE writes to the user's own calendar rather than mailing a colleague,
+    and is still outbound - the test is whether it changes state the user would
+    have to undo by hand.
+    """
+    from quorum.tracking.planner import PlannedAction
+
+    outbound = {
+        ActionType.REMIND, ActionType.NUDGE, ActionType.ESCALATE, ActionType.SCHEDULE
+    }
+    for action_type in ActionType:
         assert PlannedAction("id", action_type, "r").is_outbound == (action_type in outbound)
+
+
+def test_planner_never_proposes_a_schedule_action():
+    """SCHEDULE belongs to the calendar sync, not the daily sweep. If the
+    planner started emitting it, `today` would silently try to write events."""
+    ledger = Ledger("p")
+    ledger.commitments.append(commit("overdue", due=date(2026, 3, 1)))
+    ledger.commitments.append(commit("upcoming", due=date(2026, 3, 11)))
+    ledger.commitments.append(commit("undated"))
+
+    report = Planner().plan(ledger, TODAY)
+    assert all(a.action is not ActionType.SCHEDULE for a in report.actions)
 
 
 def test_apply_records_the_nudge_only_for_outbound_actions():

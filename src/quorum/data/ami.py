@@ -116,13 +116,28 @@ class AmiCorpus:
 
     # -- discovery ---------------------------------------------------------
 
-    def meeting_ids(self) -> list[str]:
+    def meeting_ids(self, annotated_only: bool = False) -> list[str]:
+        """Meetings in the corpus, optionally only the scoreable ones.
+
+        Not every meeting with a transcript has an annotator's summary: the
+        `EN*` series ships words and no `abstractive/` file at all, and it sorts
+        first, so an evaluation that took "the first N meetings" evaluated
+        against zero ground truth and reported precision 0.000 - a number that
+        looks like a devastating result and is actually an empty comparison.
+        """
         found = set()
         for path in (self.root / "words").glob("*.words.xml"):
             match = _MEETING_RE.match(path.name)
             if match:
                 found.add(match.group(1))
+        if annotated_only:
+            found = {mid for mid in found if self.has_annotations(mid)}
         return sorted(found)
+
+    def has_annotations(self, meeting_id: str) -> bool:
+        """Whether an annotator wrote a summary for this meeting."""
+        folder = self.root / "abstractive"
+        return any(folder.glob(f"{meeting_id}.*abssumm.xml")) if folder.exists() else False
 
     def speakers_for(self, meeting_id: str) -> list[str]:
         letters = set()
@@ -175,7 +190,10 @@ class AmiCorpus:
 
     def load_all(self, limit: int | None = None, require_actions: bool = True) -> list[AmiMeeting]:
         meetings = []
-        for meeting_id in self.meeting_ids():
+        # Filter on the filesystem before parsing. The unannotated `EN*` series
+        # sorts first and is ~100 meetings, so parsing them all to discard them
+        # made a two-meeting evaluation take minutes of pure waste.
+        for meeting_id in self.meeting_ids(annotated_only=require_actions):
             try:
                 meeting = self.load(meeting_id)
             except (FileNotFoundError, ElementTree.ParseError) as exc:

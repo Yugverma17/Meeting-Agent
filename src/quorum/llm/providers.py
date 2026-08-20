@@ -101,30 +101,22 @@ GEMINI_MODELS = [
 # --- Groq free tier ---------------------------------------------------------
 # Huge daily allowance but a punishing 6k tokens/minute. Groq is the reason the
 # pipeline segments transcripts instead of sending them whole.
-# qwen/qwen3.6-27b is deliberately excluded: it 400s on Groq's JSON mode.
+#
+# Re-verified 2026-08-20. `llama-3.1-8b-instant` and `llama-3.3-70b-versatile`
+# were both removed and now 404 with "does not exist or you do not have access
+# to it" - they are gone from the account entirely, not merely rate-limited.
+# That took the only Groq model out of the FAST tier; FAST now starts on Gemini
+# and degrades into BALANCED, which `fallback_chain` already does.
+#
+# Still excluded, re-tested the same day: `qwen/qwen3.6-27b` returns
+# 400 json_validate_failed in JSON mode, exactly as it did in August, and spends
+# its output allowance on `<think>` before answering.
+#
+# `groq/compound-mini` and `openai/gpt-oss-safeguard-20b` are alive and handle
+# JSON mode, but neither is listed here: this project's own rule is to benchmark
+# a model on the real task before trusting it, and neither has been. They are
+# candidates, not entries.
 GROQ_MODELS = [
-    ModelSpec(
-        name="llama-3.1-8b-instant",
-        provider="groq",
-        tier=ModelTier.FAST,
-        rpm=30,
-        rpd=14_400,
-        tpm=6_000,
-        context_tokens=131_072,
-        supports_json_schema=False,
-        notes="Highest daily volume available anywhere on a free tier.",
-    ),
-    ModelSpec(
-        name="llama-3.3-70b-versatile",
-        provider="groq",
-        tier=ModelTier.BALANCED,
-        rpm=30,
-        rpd=1_000,
-        tpm=6_000,
-        context_tokens=131_072,
-        supports_json_schema=False,
-        notes="Fastest model measured end-to-end (~0.4s).",
-    ),
     ModelSpec(
         name="openai/gpt-oss-20b",
         provider="groq",

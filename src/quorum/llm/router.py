@@ -30,6 +30,7 @@ from quorum.llm.providers import (
     registry as default_registry,
 )
 from quorum.llm.ratelimit import QuotaTracker, estimate_tokens
+from quorum.llm.tracing import add_metadata, traced
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +99,9 @@ class Router:
 
         self._clients: dict[str, Any] = {}
         self._call_counts: dict[str, int] = {}
+        self._retired: set[str] = set()
+        """Models the provider has withdrawn. Discovered at run time and skipped
+        thereafter, because a 404 will not become a 200 by waiting."""
 
     # -- provider clients (lazy so importing needs no credentials) ---------
 
@@ -212,8 +216,24 @@ class Router:
             for marker in ("429", "rate limit", "rate_limit", "quota", "resource_exhausted")
         )
 
+    @staticmethod
+    def _is_model_gone(exc: Exception) -> bool:
+        """Whether the model has been withdrawn rather than merely refused.
+
+        Providers retire free-tier models without warning - Groq removed both
+        llama entries in this registry between one week and the next. A rate
+        limit is worth retrying in a minute; a withdrawal is not worth retrying
+        ever, and the two are worth telling apart because a retired model that
+        stays in the chain costs a failed round trip on every single call.
+        """
+        text = f"{type(exc).__name__} {exc}".lower()
+        return "model_not_found" in text or (
+            "404" in text and "does not exist" in text
+        )
+
     # -- core -------------------------------------------------------------
 
+    @traced("router.complete", run_type="llm")
     def complete(
         self,
         prompt: str,
@@ -255,6 +275,13 @@ class Router:
 
         while True:
             for spec in chain:
+                if spec.key in self._retired:
+                    # Withdrawn earlier in this run. Recorded is not the same as
+                    # skipped: the first version of this logged the retirement
+                    # and then tried the model again on the very next call,
+                    # which is the cost it exists to avoid.
+                    continue
+
                 cache_key = LLMCache.make_key(
                     provider=spec.provider,
                     model=spec.name,
@@ -268,6 +295,10 @@ class Router:
                 )
                 hit = self.cache.get(cache_key)
                 if hit is not None:
+                    add_metadata(
+                        model=spec.name, provider=spec.provider, purpose=purpose,
+                        cached=True, degraded=spec.tier is not tier,
+                    )
                     return LLMResponse(
                         text=hit["text"],
                         model=spec.name,
@@ -296,6 +327,20 @@ class Router:
                         response_schema, thinking,
                     )
                 except Exception as exc:  # noqa: BLE001 - provider SDKs raise varied types
+                    if self._is_model_gone(exc):
+                        # Permanent. Drop it for the life of the process so the
+                        # next call does not pay for the same discovery, and say
+                        # so loudly once - the registry needs editing, and
+                        # `models --probe` is what confirms the rest.
+                        if spec.key not in self._retired:
+                            log.error(
+                                "%s no longer exists on this account; skipping it "
+                                "for the rest of this run. Check `quorum models "
+                                "--probe` and update the registry.", spec.key,
+                            )
+                            self._retired.add(spec.key)
+                        blocked.append(f"{spec.key}: withdrawn by the provider")
+                        continue
                     if self._is_rate_limit_error(exc):
                         # The provider disagrees with our accounting. Trust the
                         # provider: burn the local budget so we stop trying it.
@@ -322,6 +367,15 @@ class Router:
                         "provider": spec.provider,
                         "purpose": purpose,
                     },
+                )
+                # Which model actually answered is decided here, not at the call
+                # site, so it has to be attached rather than passed in. It is
+                # also the first thing worth filtering a trace list on when
+                # numbers move between runs.
+                add_metadata(
+                    model=spec.name, provider=spec.provider, purpose=purpose,
+                    cached=False, degraded=spec.tier is not tier,
+                    total_tokens=total, attempts=list(attempts),
                 )
                 return LLMResponse(
                     text=text,
@@ -355,6 +409,7 @@ class Router:
 
     # -- structured output -------------------------------------------------
 
+    @traced("router.structured", run_type="chain")
     def structured(
         self,
         prompt: str,

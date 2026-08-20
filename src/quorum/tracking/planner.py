@@ -62,6 +62,11 @@ class ActionType(str, Enum):
     """An upstream commitment slipped, so this one is at risk through no fault
     of its owner. Nagging them would be unfair and useless."""
 
+    SCHEDULE = "schedule"
+    """Write deadlines to the user's calendar. Never produced by `plan()` - the
+    calendar sync raises it directly - but it belongs in this vocabulary because
+    it is an outbound side effect and has to pass the same gate."""
+
 
 @dataclass
 class DeliveryEvidence:
@@ -94,9 +99,20 @@ class PlannedAction:
 
     @property
     def is_outbound(self) -> bool:
-        """Whether performing this would contact a human. These are the only
-        actions that require approval."""
-        return self.action in (ActionType.REMIND, ActionType.NUDGE, ActionType.ESCALATE)
+        """Whether performing this leaves the machine. These are the only
+        actions that require approval.
+
+        `SCHEDULE` is included even though it writes to the user's own calendar
+        rather than mailing a colleague. The test is not "does it embarrass
+        someone" but "does it change state outside this process that the user
+        would have to undo by hand".
+        """
+        return self.action in (
+            ActionType.REMIND,
+            ActionType.NUDGE,
+            ActionType.ESCALATE,
+            ActionType.SCHEDULE,
+        )
 
     def as_dict(self) -> dict:
         return {

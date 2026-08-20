@@ -65,8 +65,14 @@ class MemoryHit:
     meeting_date: str
     score: float
 
+    project_id: str = ""
+    """Which project this came from. Empty for a single-project search, filled
+    in when several are searched at once - an answer drawn from three projects
+    is only useful if the reader can tell which is which."""
+
     def __str__(self) -> str:
-        return f"[{self.kind.value} {self.meeting_date}] {self.text}"
+        where = f" {self.project_id}" if self.project_id else ""
+        return f"[{self.kind.value}{where} {self.meeting_date}] {self.text}"
 
 
 class ProjectMemory:
@@ -240,15 +246,28 @@ class ProjectMemory:
     # -- retrieval ---------------------------------------------------------
 
     def recall(
-        self, query: str, k: int = 5, kind: MemoryKind | None = None, min_score: float = 0.0
+        self,
+        query: str,
+        k: int = 5,
+        kind: MemoryKind | None = None,
+        min_score: float = 0.0,
+        meeting_ids: list[str] | None = None,
     ) -> list[MemoryHit]:
-        """Semantically nearest stored items."""
+        """Semantically nearest stored items.
+
+        `meeting_ids` narrows the search to particular meetings or lectures.
+        Asking "what did he say about complexity" while looking at one lecture
+        should not answer from a different one - and over-fetching then
+        filtering is what keeps that honest, since a post-filter on a top-k that
+        was already dominated by another meeting would return nothing at all.
+        """
         if not query.strip():
             return []
         self._connect()
         vector = self.embedder.embed([query])[0]
 
-        rows = self._search(vector, k * 4 if kind else k)
+        widen = 4 if (kind or meeting_ids) else 1
+        rows = self._search(vector, k * widen)
         hits = [
             MemoryHit(
                 kind=MemoryKind(row["kind"]), ref_id=row["ref_id"], text=row["text"],
@@ -259,6 +278,9 @@ class ProjectMemory:
         ]
         if kind is not None:
             hits = [hit for hit in hits if hit.kind is kind]
+        if meeting_ids:
+            wanted = set(meeting_ids)
+            hits = [hit for hit in hits if hit.meeting_id in wanted]
         return [hit for hit in hits if hit.score >= min_score][:k]
 
     def _search(self, vector: np.ndarray, k: int) -> list[dict]:

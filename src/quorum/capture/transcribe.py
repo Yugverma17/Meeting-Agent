@@ -42,6 +42,41 @@ class TranscriptSegment:
         return max(0.0, self.end_s - self.start_s)
 
 
+def rescale(segments: list[TranscriptSegment], factor: float) -> list[TranscriptSegment]:
+    """Map capture-clock times onto source-media times, at a constant rate.
+
+    Recording a video played at 2x captures nine minutes of audio for an
+    eighteen-minute lecture, and every timestamp then points at half its real
+    position - a note saying a concept was explained at 06:24 sends you to 06:24
+    in a video where it happens at 12:48.
+
+    **This only holds if the whole thing was watched straight through at one
+    speed.** Capture time is monotonic; video position is not. Skipping forward
+    advances the video while the clock runs normally, changing speed part-way
+    bends the mapping at a point nothing here can see, and rewatching a section
+    puts the *same* video position at two different capture times - so the
+    mapping stops being a function at all, and no scalar can express it.
+
+    A single factor is therefore a convenience for the common case, not a
+    general solution. When the session was not linear the honest answer is that
+    these are positions in the recording, and `quorum transcript --search` is
+    the way to find a moment again.
+
+    The text is untouched - only when things were said.
+    """
+    if factor <= 0 or factor == 1.0:
+        return segments
+    return [
+        TranscriptSegment(
+            channel=segment.channel,
+            start_s=segment.start_s * factor,
+            end_s=segment.end_s * factor,
+            text=segment.text,
+        )
+        for segment in segments
+    ]
+
+
 @dataclass
 class TranscriptionStats:
     chunks: int = 0

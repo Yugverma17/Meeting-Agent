@@ -5,6 +5,12 @@ description = "An agent that tracks what people commit to in meetings, verifies 
 requires-python = ">=3.11"
 readme = "README.md"
 
+[project.scripts]
+# `python -m quorum.cli ...` always works; this is what makes the short form in
+# the README a real command. A Typer app is callable, so it serves directly as
+# the entry point.
+quorum = "quorum.cli:app"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

@@ -2,6 +2,7 @@
 
 from quorum.tracking.ledger import Ledger, MergeOutcome
 from quorum.tracking.planner import ActionType, PlannedAction, Planner, PlannerConfig
+from quorum.tracking.weekly import WeeklyReport, build_report
 
 __all__ = [
     "Ledger",
@@ -10,4 +11,6 @@ __all__ = [
     "PlannerConfig",
     "PlannedAction",
     "ActionType",
+    "WeeklyReport",
+    "build_report",
 ]

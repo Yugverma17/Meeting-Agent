@@ -54,6 +54,15 @@ class ProjectMeta:
     members: dict[str, str] = field(default_factory=dict)
     """display name -> email. Seeds the roster for live capture."""
 
+    handles: dict[str, str] = field(default_factory=dict)
+    """handle -> meeting_id. A short name you can say out loud.
+
+    `mtg_9f2c1a4b7e30` is not something anyone refers to a lecture by, and a
+    title is not stable - you can rename a meeting, and two standups share one.
+    A handle is the name *you* chose, so `@kickoff` means the same thing in six
+    weeks as it does today.
+    """
+
     meeting_count: int = 0
     last_meeting_on: str | None = None
 

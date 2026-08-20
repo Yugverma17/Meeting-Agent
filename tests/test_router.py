@@ -262,3 +262,56 @@ def test_stats_report_cache_and_quota(router, monkeypatch):
 )
 def test_strip_code_fences(raw, expected):
     assert _strip_code_fences(raw) == expected
+
+
+# --- a withdrawn model is not a rate limit ----------------------------------
+
+
+class GoneModel(Exception):
+    """Shaped like Groq's NotFoundError for a retired model."""
+
+    def __str__(self) -> str:
+        return ("Error code: 404 - {'error': {'message': 'The model "
+                "`llama-3.3-70b-versatile` does not exist or you do not have "
+                "access to it.', 'code': 'model_not_found'}}")
+
+
+def test_a_withdrawn_model_is_told_apart_from_a_rate_limit():
+    """Groq removed both llama models in this registry between one week and the
+    next. A rate limit is worth retrying in a minute; a withdrawal never is."""
+    from quorum.llm.router import Router
+
+    assert Router._is_model_gone(GoneModel())
+    assert not Router._is_rate_limit_error(GoneModel())
+    assert not Router._is_model_gone(RuntimeError("429 rate limit exceeded"))
+
+
+def test_a_withdrawn_model_is_dropped_for_the_rest_of_the_run(settings, cache, quota):
+    """Left in the chain, a retired model costs a failed round trip on every
+    single call - which is exactly what a real run looked like."""
+    from quorum.llm.providers import ModelTier
+    from quorum.llm.router import Router
+
+    router = Router(settings=settings, cache=cache, quota=quota)
+    chain = router.registry.fallback_chain(ModelTier.BALANCED, ["gemini", "groq"])
+    dead, alive = chain[0], chain[1]
+    attempts: list[str] = []
+
+    def fake_call(spec, *args, **kwargs):
+        attempts.append(spec.key)
+        if spec.key == dead.key:
+            raise GoneModel()
+        return "answered", 5, 5
+
+    router._call_gemini = fake_call
+    router._call_groq = fake_call
+
+    first = router.complete("hello", tier=ModelTier.BALANCED)
+    assert first.text == "answered"
+    assert attempts == [dead.key, alive.key]
+
+    router.cache.enabled = False
+    router.complete("a different prompt", tier=ModelTier.BALANCED)
+
+    assert attempts.count(dead.key) == 1, "the retired model was tried again"
+    assert dead.key in router._retired

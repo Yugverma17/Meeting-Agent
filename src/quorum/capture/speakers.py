@@ -24,8 +24,9 @@ colleague, which is the worse failure and the harder one to notice.
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
@@ -139,9 +140,19 @@ def build_transcript(
     if not any(s.id == REMOTE_SPEAKER_ID for s in speakers):
         speakers.append(remote)
 
+    # Unique per recording, and sortable. The id used to be derived from the
+    # first utterance's start time, which is always 0.0 - so every live
+    # recording was called `live_0` and each one silently overwrote the last:
+    # its transcript file, and its entries in the vector index, which are keyed
+    # on meeting id and replaced rather than appended. A lecture recorded on
+    # Tuesday destroyed the one from Monday with no error and no warning.
+    recording_id = meeting_id or (
+        f"live_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
+    )
+
     utterances = [
         Utterance(
-            id=f"live_u{index}", index=index,
+            id=f"{recording_id}_u{index}", index=index,
             speaker_id=roster.you.id if segment.channel == MIC else REMOTE_SPEAKER_ID,
             text=segment.text, start_s=segment.start_s, end_s=segment.end_s,
         )
@@ -149,7 +160,7 @@ def build_transcript(
     ]
 
     return Transcript(
-        meeting_id=meeting_id or f"live_{int(merged[0].start_s) if merged else 0}",
+        meeting_id=recording_id,
         title=title,
         meeting_date=meeting_date or date.today(),
         speakers=speakers,

@@ -108,6 +108,25 @@ class Transcript(BaseModel):
         ends = [u.end_s for u in self.utterances if u.end_s is not None]
         return max(ends) if ends else None
 
+    @property
+    def speakers_present(self) -> list[Speaker]:
+        """Only the people who actually said something.
+
+        `speakers` is the declared roster and routinely contains more than that:
+        live capture always adds a "Remote participant" placeholder so the
+        loopback channel has somewhere to attribute to, whether or not anyone
+        else was there. Counting the roster made every solo lecture look like a
+        two-person meeting.
+        """
+        heard = {u.speaker_id for u in self.utterances}
+        return [s for s in self.speakers if s.id in heard]
+
+    @property
+    def is_monologue(self) -> bool:
+        """One voice throughout - a lecture, talk or seminar rather than a
+        meeting. Decides which questions are worth asking of it at the end."""
+        return len({u.speaker_id for u in self.utterances}) <= 1
+
 
 class Segment(BaseModel):
     """A topic-coherent run of utterances.
@@ -208,6 +227,27 @@ class Deadline(BaseModel):
     confidence: float = 0.0
 
 
+class DeadlineChange(BaseModel):
+    """One movement of a due date, and where it came from.
+
+    Applying a slip used to overwrite the deadline outright, so "the spec has
+    moved three times, originally due the 8th" was unknowable - and that is
+    precisely the sentence a weekly report exists to produce. A date that keeps
+    moving is a different problem from one that is merely late, and only the
+    history tells them apart.
+    """
+
+    on: date
+    """When the change was made - the meeting's date, not today's."""
+
+    was: date | None = None
+    to: date | None = None
+    source: str = "meeting"
+    """"meeting" (someone said so), "triage" or "chat" (you said so)."""
+
+    note: str = ""
+
+
 class Assignee(BaseModel):
     """Who owns the commitment.
 
@@ -246,6 +286,33 @@ class Commitment(Grounded):
     nudge_count: int = 0
     last_action_on: date | None = None
     resolution_note: str | None = None
+
+    deadline_history: list[DeadlineChange] = Field(default_factory=list)
+    """Every time the due date moved. Append-only, and never pruned - the whole
+    value is in the count."""
+
+    @property
+    def times_slipped(self) -> int:
+        """How often the date has moved *later*.
+
+        Only later. Pulling a deadline forward is not a slip, and counting it as
+        one would report a team that got ahead of schedule as being in trouble.
+        """
+        return sum(
+            1 for change in self.deadline_history
+            if change.was and change.to and change.to > change.was
+        )
+
+    def record_deadline_change(
+        self, new_date: date | None, on: date, source: str = "meeting", note: str = ""
+    ) -> None:
+        """Move the deadline, keeping what it was."""
+        previous = self.deadline.resolved
+        if previous == new_date:
+            return
+        self.deadline_history.append(
+            DeadlineChange(on=on, was=previous, to=new_date, source=source, note=note)
+        )
 
     @property
     def is_actionable(self) -> bool:
