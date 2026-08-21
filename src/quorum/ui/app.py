@@ -120,9 +120,83 @@ def sidebar() -> str | None:
                 st.sidebar.caption(f"{undated} still need a deadline")
 
     st.sidebar.divider()
+    _google_panel()
+    st.sidebar.divider()
     st.sidebar.caption("Everything runs on this laptop. Nothing is sent "
                        "without you approving it.")
     return chosen
+
+
+def _google_panel() -> None:
+    """Sign in, and say plainly which mailbox that makes the drafts go to.
+
+    Drafts are created against `userId="me"`, so the account signed in here *is*
+    where they land. Showing the address is not decoration - it is the one thing
+    worth checking before an app writes into your mail.
+    """
+    from quorum.integrations import credentials_status
+
+    status = credentials_status()
+    st.sidebar.markdown("### Google")
+
+    if not status.libraries_installed:
+        st.sidebar.warning("Google libraries are not installed.")
+        st.sidebar.code("pip install google-api-python-client "
+                        "google-auth-oauthlib google-auth-httplib2")
+        return
+
+    if not status.secrets_present:
+        st.sidebar.info("Not set up yet — needs a one-time Google Cloud step.")
+        with st.sidebar.expander("How"):
+            st.markdown(
+                "1. Open [Google Cloud credentials]"
+                "(https://console.cloud.google.com/apis/credentials)\n"
+                "2. Enable the **Google Calendar API** and the **Gmail API**\n"
+                "3. Create Credentials → OAuth client ID → **Desktop app**\n"
+                "4. Download the JSON and save it as `credentials.json` in the "
+                "project folder\n\n"
+                "Then the Connect button appears here."
+            )
+        return
+
+    if status.ready:
+        st.sidebar.success(f"Signed in as **{status.account or 'unknown account'}**")
+        st.sidebar.caption("Drafts go to this mailbox. Calendar events go to "
+                           "this account.")
+        if st.sidebar.button("Disconnect", use_container_width=True):
+            from quorum.integrations import revoke
+
+            revoke()
+            st.session_state.pop("drafts", None)
+            st.rerun()
+        return
+
+    st.sidebar.caption("Connect to put deadlines in your calendar and drafts "
+                       "in your Gmail.")
+    if st.sidebar.button("Connect Google", type="primary", use_container_width=True):
+        _run_consent()
+
+
+def _run_consent() -> None:
+    """Open the consent window and wait.
+
+    This blocks the page while Google's browser tab is open, which is honest:
+    there is nothing to do until consent is given or refused. The timeout in
+    `authorise` is what stops a closed tab leaving the page waiting forever.
+    """
+    from quorum.integrations import GoogleAuthError, authorise
+
+    with st.spinner("A Google sign-in window is opening — approve it there, "
+                    "then come back to this page."):
+        try:
+            authorise(interactive=True, timeout_seconds=300)
+        except GoogleAuthError as exc:
+            st.sidebar.error(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - the OAuth stack fails in many ways
+            st.sidebar.error(f"Sign-in failed: {type(exc).__name__}: {exc}")
+            return
+    st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -243,10 +317,47 @@ def record_tab(project_id: str | None) -> None:
         try:
             fresh.begin()
         except Exception as exc:  # noqa: BLE001 - audio devices fail in many ways
-            _toast_error(exc, "Starting the recording")
+            _explain_audio_failure(exc, system_only)
             return
         st.session_state["recording"] = fresh
         st.rerun()
+
+
+def _explain_audio_failure(exc: Exception, system_only: bool) -> None:
+    """Say what to change, not what threw.
+
+    Windows denies microphone access with a generic device error rather than
+    anything mentioning permission, so "Unanticipated host error" is the whole
+    message a user gets - and the fix is two clicks away in a Settings page they
+    have no reason to suspect.
+    """
+    detail = f"{type(exc).__name__}: {exc}"
+    st.error(f"Could not start recording — {detail}")
+
+    text = detail.lower()
+    denied = any(marker in text for marker in
+                 ("unanticipated host error", "permission", "denied", "-9999", "access"))
+
+    if denied and not system_only:
+        st.warning(
+            "**Windows is probably blocking the microphone.**\n\n"
+            "Open **Settings → Privacy & security → Microphone**, turn on "
+            "*Microphone access*, and make sure *Let desktop apps access your "
+            "microphone* is on. Then press Start again.",
+            icon="🎤",
+        )
+    elif system_only:
+        st.warning(
+            "**No system audio to record.**\n\n"
+            "This mode listens to your speakers. Check that something is "
+            "playing, the tab is not muted, and your output device is the one "
+            "shown above. For a lecture in a room, choose "
+            "*Lecture (in a room)* instead — that uses the microphone.",
+            icon="🔈",
+        )
+    else:
+        st.info("Another app may be holding the microphone. Close anything else "
+                "recording — a call, a voice recorder — and try again.")
 
 
 def _finish_recording(session) -> None:

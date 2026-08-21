@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,8 +50,21 @@ the use, because a reviewer should not have to take that on trust:
 Not requested: `gmail.readonly`, `gmail.modify`, or anything touching the
 inbox."""
 
-ALL_SCOPES = [*CALENDAR_SCOPES, *GMAIL_SCOPES]
-"""Asked for together, so consent happens once rather than twice."""
+IDENTITY_SCOPES = ["openid", "https://www.googleapis.com/auth/userinfo.email"]
+"""Which account signed in - the address, and nothing else.
+
+Not vanity. Drafts are created against `userId="me"`, so the signed-in account
+*is* the mailbox they land in, and an app that will not tell you which account
+that is asks you to take on trust the one thing worth checking. It also has to
+be requested to be knowable: the status line read "authorised as unknown"
+because the code asked Google for the address without ever asking permission to
+have it.
+
+`userinfo.email` grants the address. Not `userinfo.profile`, which would also
+hand over a name and a photograph that nothing here displays."""
+
+ALL_SCOPES = [*IDENTITY_SCOPES, *CALENDAR_SCOPES, *GMAIL_SCOPES]
+"""Asked for together, so consent happens once rather than three times."""
 
 TOKEN_PATH = DATA_DIR / "token.json"
 """Where the refresh token lands. Gitignored by filename, at any depth."""
@@ -82,7 +96,7 @@ class CredentialsStatus:
         if not self.secrets_present:
             return "no OAuth client secrets file - see README"
         if not self.token_present:
-            return "not authorised yet - run `quorum auth google`"
+            return "not connected yet"
         if self.expired:
             return f"authorised as {self.account or 'unknown'} (token will refresh on use)"
         return f"authorised as {self.account or 'unknown'}"
@@ -186,6 +200,7 @@ def authorise(
     secrets_file: str | Path | None = None,
     token_path: Path | None = None,
     interactive: bool = True,
+    timeout_seconds: int = 300,
 ):
     """Return usable credentials, refreshing or prompting for consent as needed.
 
@@ -234,10 +249,29 @@ def authorise(
             f"{secrets} or set GOOGLE_CLIENT_SECRETS_FILE."
         )
 
+    # Requesting `openid` makes Google return a slightly different scope set
+    # than was asked for, and oauthlib treats any difference as tampering and
+    # raises. The grant is a superset, `_scopes_match` checks that properly, and
+    # this is the documented way to stop the library refusing it.
+    os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+
     flow = InstalledAppFlow.from_client_secrets_file(str(secrets), scopes)
     # port=0 lets the OS pick a free loopback port; a hardcoded one collides
     # with whatever else is running and fails with an unhelpful browser error.
-    creds = flow.run_local_server(port=0, prompt="consent")
+    #
+    # The timeout matters when this is called from the interface rather than a
+    # terminal: without it, closing the consent tab leaves the page waiting for
+    # a redirect that will never arrive, with no way to cancel.
+    creds = flow.run_local_server(
+        port=0, prompt="consent", timeout_seconds=timeout_seconds,
+        success_message=(
+            "Quorum is connected. You can close this tab and go back to the app."
+        ),
+    )
+    if creds is None:
+        raise GoogleAuthError(
+            "Sign-in was not completed - the consent window timed out or was closed."
+        )
     _save_credentials(creds, token, account=_account_email(creds))
     return creds
 

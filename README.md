@@ -734,6 +734,27 @@ face - the recording, the models and your data never leave the laptop. Streamlit
 telemetry is turned off at launch, because a tool that phones home about a page
 displaying your colleagues' words is not one to leave on by default.
 
+### Signing in
+
+Connecting Google happens in the sidebar, not the terminal. The panel shows the
+address you signed in as, because drafts are created against `userId="me"` — the
+account you connect *is* the mailbox they land in, and an app that will not tell
+you which account that is asks you to take on trust the one thing worth
+checking.
+
+That address had to be *asked for* to be knowable. The status line read
+"authorised as unknown" for a while because the code asked Google for the
+address without ever requesting permission to have it. `openid` and
+`userinfo.email` are now part of the grant — the address, and nothing else. Not
+`userinfo.profile`, which would also hand over a name and a photograph that
+nothing here displays.
+
+Windows permissions are reported as instructions rather than as errors. Windows
+denies microphone access with a generic device failure, so what a user actually
+sees is "Unanticipated host error" — no mention of permission, while the fix is
+two clicks away in a Settings page they have no reason to suspect. The page now
+names the page and the toggle.
+
 It is a face on the product, not a second copy of it. Every button calls the
 same function the CLI calls, so a rule that holds in the terminal holds here -
 including the approval gate. A button is a nicer way to say yes than typing "y";
@@ -1096,7 +1117,7 @@ python -m quorum.cli auth             # authorise Google Calendar (optional)
 python -m quorum.cli resume --list    # runs a quota wall interrupted
 python -m quorum.cli name --project X # what is recorded, and its @handle
 python -m quorum.cli chat --project X # ask about it, or tell it to do something
-pytest -m "not live"                  # 634 tests
+pytest -m "not live"                  # 648 tests
 ```
 
 For the calendar you also need a Desktop OAuth client: create one at
