@@ -152,3 +152,82 @@ def test_status_is_a_pure_read(tmp_path, monkeypatch):
     monkeypatch.setattr(google_auth, "authorise", explode)
     credentials_status(secrets_file=tmp_path / "nothing.json",
                        token_path=tmp_path / "nothing.json")
+
+
+# --- finding the file Google actually gave you --------------------------------
+
+
+def test_the_configured_path_wins_when_it_exists(tmp_path, monkeypatch):
+    from quorum.integrations.google_auth import find_client_secrets
+
+    chosen = tmp_path / "credentials.json"
+    chosen.write_text("{}", encoding="utf-8")
+    (tmp_path / "client_secret_123.apps.googleusercontent.com.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    assert find_client_secrets(chosen) == chosen
+
+
+def test_googles_own_download_name_is_found_without_renaming(tmp_path, monkeypatch):
+    """Every guide says "rename it to credentials.json". That rename has no
+    purpose and silently breaks the feature when skipped - the app reports "not
+    set up yet" while the file sits in the folder."""
+    from quorum.integrations.google_auth import find_client_secrets
+
+    downloaded = tmp_path / "client_secret_44077-6iq1.apps.googleusercontent.com.json"
+    downloaded.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(google_auth, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(google_auth, "DATA_DIR", tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    assert find_client_secrets(tmp_path / "credentials.json") == downloaded
+
+
+def test_the_newest_client_wins(tmp_path, monkeypatch):
+    """Someone who regenerated a client wants the one they just downloaded."""
+    import os
+    import time
+
+    from quorum.integrations.google_auth import find_client_secrets
+
+    old = tmp_path / "client_secret_old.apps.googleusercontent.com.json"
+    new = tmp_path / "client_secret_new.apps.googleusercontent.com.json"
+    old.write_text("{}", encoding="utf-8")
+    new.write_text("{}", encoding="utf-8")
+    stale = time.time() - 10_000
+    os.utime(old, (stale, stale))
+    monkeypatch.setattr(google_auth, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(google_auth, "DATA_DIR", tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    assert find_client_secrets(tmp_path / "credentials.json") == new
+
+
+def test_nothing_found_returns_the_configured_path_for_the_error_message(tmp_path, monkeypatch):
+    """Isolated from the real project folder deliberately. The search also looks
+    in PROJECT_ROOT so the file is found whatever directory the app is launched
+    from - which meant this test picked up the developer's own client."""
+    from quorum.integrations.google_auth import find_client_secrets
+
+    empty = tmp_path / "elsewhere"
+    empty.mkdir()
+    monkeypatch.setattr(google_auth, "PROJECT_ROOT", empty)
+    monkeypatch.setattr(google_auth, "DATA_DIR", empty)
+    monkeypatch.chdir(tmp_path)
+    wanted = tmp_path / "credentials.json"
+
+    assert find_client_secrets(wanted) == wanted
+
+
+def test_client_secret_files_are_gitignored():
+    """The file holds a client secret. It must never be committable, whatever
+    Google named it."""
+    import pathlib
+
+    ignored = pathlib.Path(".gitignore").read_text(encoding="utf-8")
+
+    assert "client_secret*.json" in ignored
+    assert "credentials.json" in ignored
+    assert "token.json" in ignored

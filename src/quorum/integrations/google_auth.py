@@ -29,7 +29,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from quorum.config import DATA_DIR, get_settings
+from quorum.config import DATA_DIR, PROJECT_ROOT, get_settings
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +74,40 @@ class GoogleAuthError(RuntimeError):
     """Raised with an actionable message - what to do, not just what failed."""
 
 
+def find_client_secrets(configured: str | Path | None = None) -> Path:
+    """Locate the OAuth client file, however Google named it.
+
+    Google Cloud downloads it as
+    `client_secret_440770403973-6iq1gm....apps.googleusercontent.com.json`, and
+    every setup guide then says "rename it to credentials.json". That rename is
+    a step with no purpose that silently breaks the whole feature when skipped -
+    the app reports "not set up yet" while the file sits in the folder.
+
+    So the configured path wins if it exists, and otherwise the download name is
+    matched where it actually lands. Newest first, because someone who has
+    regenerated a client wants the one they just downloaded.
+    """
+    settings = get_settings()
+    candidate = Path(configured or settings.google_client_secrets_file)
+    if candidate.exists():
+        return candidate
+
+    for folder in (Path.cwd(), PROJECT_ROOT, DATA_DIR):
+        try:
+            found = sorted(
+                folder.glob("client_secret*.json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:  # pragma: no cover - unreadable directory
+            continue
+        if found:
+            log.info("Using OAuth client secrets at %s", found[0])
+            return found[0]
+
+    return candidate
+
+
 @dataclass
 class CredentialsStatus:
     """What `doctor` and the CLI need to know without triggering a login."""
@@ -112,7 +146,7 @@ def credentials_status(
 ) -> CredentialsStatus:
     """Inspect local state. Never opens a browser and never hits the network."""
     settings = get_settings()
-    secrets = Path(secrets_file or settings.google_client_secrets_file)
+    secrets = find_client_secrets(secrets_file)
     token = Path(token_path or TOKEN_PATH)
 
     try:
@@ -219,7 +253,7 @@ def authorise(
 
     settings = get_settings()
     scopes = scopes or ALL_SCOPES
-    secrets = Path(secrets_file or settings.google_client_secrets_file)
+    secrets = find_client_secrets(secrets_file)
     token = Path(token_path or TOKEN_PATH)
 
     creds = _load_credentials(token, scopes)

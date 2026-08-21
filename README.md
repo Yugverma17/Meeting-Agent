@@ -736,6 +736,15 @@ displaying your colleagues' words is not one to leave on by default.
 
 ### Signing in
 
+Google downloads the OAuth client as
+`client_secret_440770403973-6iq1gm….apps.googleusercontent.com.json`, and every
+setup guide then tells you to rename it to `credentials.json`. That rename
+accomplishes nothing and silently breaks the whole feature when skipped — the
+app reports "not set up yet" while the file sits in the folder. So the download
+name is matched where it actually lands, newest first. Dropping the file in is
+the entire step.
+
+
 Connecting Google happens in the sidebar, not the terminal. The panel shows the
 address you signed in as, because drafts are created against `userId="me"` — the
 account you connect *is* the mailbox they land in, and an app that will not tell
@@ -1117,7 +1126,7 @@ python -m quorum.cli auth             # authorise Google Calendar (optional)
 python -m quorum.cli resume --list    # runs a quota wall interrupted
 python -m quorum.cli name --project X # what is recorded, and its @handle
 python -m quorum.cli chat --project X # ask about it, or tell it to do something
-pytest -m "not live"                  # 648 tests
+pytest -m "not live"                  # 653 tests
 ```
 
 For the calendar you also need a Desktop OAuth client: create one at
