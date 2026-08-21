@@ -41,6 +41,11 @@ google-api-python-client>=2.150
 google-auth-oauthlib>=1.2
 google-auth-httplib2>=0.2
 
+# --- Interface ---
+# `quorum ui` serves a local page. Local because recording system audio
+# needs WASAPI loopback access, which nothing remote can have.
+streamlit>=1.40
+
 # --- Utilities ---
 rapidfuzz>=3.10
 typer>=0.15

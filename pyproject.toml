@@ -24,6 +24,7 @@ pythonpath = ["src"]
 addopts = "-q"
 markers = [
     "live: hits a real LLM provider; consumes free-tier quota (deselect with -m 'not live')",
+    "slow: executes the Streamlit page end to end; seconds, not milliseconds",
 ]
 
 [tool.ruff]

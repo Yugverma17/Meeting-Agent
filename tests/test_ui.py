@@ -1,0 +1,165 @@
+"""The Streamlit interface.
+
+Two kinds of test here, and the first kind is the one that matters.
+
+`RecordingSession` is plain logic with a clock, and it holds the rules that
+Streamlit's re-run model makes easy to get wrong: start once, stop is separate
+from finish, and elapsed time is the wall clock rather than the recorder's
+`captured_seconds` (which sums both channels and reads as double).
+
+The second is a smoke test that actually executes the page. A Streamlit script
+only fails at render time - a plain HTTP request gets the shell and reports 200
+however broken the script is - so nothing short of running it catches a typo in
+a dict key. The first version of this app read `found['system']` where the
+recorder returns `found['loopback']`, and only `AppTest` found it.
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from quorum.ui.session import AlreadyRecording, RecordingSession
+
+
+class FakeRecorder:
+    def __init__(self) -> None:
+        self.started = False
+        self.stopped = False
+        self.skipped_silent = 3
+        self.drained: list = []
+
+    def start(self, announced: bool = True) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def drain(self):
+        return list(self.drained)
+
+
+def live_session(**kwargs) -> RecordingSession:
+    session = RecordingSession(title="Weekly sync", **kwargs)
+    session.recorder = FakeRecorder()
+    session.started_at = time.time()
+    return session
+
+
+# --- the rules Streamlit's rerun model makes easy to break -------------------
+
+
+def test_a_second_recording_cannot_start_while_one_is_live():
+    """A double-click, or a rerun fired while the callback was still running,
+    would otherwise open a second pair of streams on the same devices - and the
+    two then fight over the microphone."""
+    session = live_session()
+
+    with pytest.raises(AlreadyRecording):
+        session.begin()
+
+
+def test_elapsed_is_the_wall_clock_not_the_captured_seconds():
+    """`captured_seconds` sums the microphone and loopback streams, so it reads
+    as roughly double: a nine-minute lecture reported as sixteen minutes, which
+    looks like half of it went missing."""
+    session = live_session()
+    session.started_at = time.time() - 65
+
+    assert 64 <= session.elapsed_s <= 67
+    assert session.elapsed_label == "01:05"
+
+
+def test_the_clock_stops_when_the_recording_does():
+    session = live_session()
+    session.started_at = time.time() - 30
+    session.stop()
+    frozen = session.elapsed_s
+    time.sleep(0.05)
+
+    assert session.elapsed_s == frozen
+
+
+def test_stopping_twice_is_harmless():
+    session = live_session()
+    session.stop()
+    first = session.stopped_at
+    session.stop()
+
+    assert session.stopped_at == first
+
+
+def test_a_failure_to_stop_does_not_strand_the_page():
+    """The session must leave the live state even if the audio layer errors, or
+    the UI shows a Stop button that can never be satisfied."""
+    class Stubborn(FakeRecorder):
+        def stop(self):
+            raise RuntimeError("device already closed")
+
+    session = live_session()
+    session.recorder = Stubborn()
+    session.stop()
+
+    assert not session.live
+    assert "device already closed" in session.error
+
+
+def test_a_session_that_never_started_reports_no_time():
+    assert RecordingSession(title="x").elapsed_s == 0.0
+    assert RecordingSession(title="x").elapsed_label == "00:00"
+
+
+# --- which audio is kept ------------------------------------------------------
+
+
+class Chunk:
+    def __init__(self, channel: str) -> None:
+        self.channel = channel
+
+
+def test_a_video_lecture_keeps_only_the_speaker_channel():
+    from quorum.capture.audio import MIC, SYSTEM
+
+    session = live_session(system_only=True)
+    session.recorder.drained = [Chunk(SYSTEM), Chunk(MIC), Chunk(SYSTEM)]
+
+    assert [c.channel for c in session.chunks()] == [SYSTEM, SYSTEM]
+
+
+def test_a_meeting_keeps_both_channels():
+    from quorum.capture.audio import MIC, SYSTEM
+
+    session = live_session(system_only=False)
+    session.recorder.drained = [Chunk(SYSTEM), Chunk(MIC)]
+
+    assert len(session.chunks()) == 2
+
+
+def test_no_recorder_means_no_chunks():
+    assert RecordingSession(title="x").chunks() == []
+
+
+# --- the page actually renders ------------------------------------------------
+
+
+@pytest.mark.slow
+def test_the_page_renders_without_raising(tmp_path, monkeypatch):
+    """A Streamlit script fails at render time, not import time. A plain request
+    for the page returns 200 however broken it is, so only executing it catches
+    a wrong dict key - which is exactly what this found on its first run."""
+    import pathlib
+
+    import quorum.ui
+    from streamlit.testing.v1 import AppTest
+
+    # Located from the installed package, not from the working directory -
+    # pytest does not promise to run from the repository root.
+    script = pathlib.Path(quorum.ui.__file__).parent / "app.py"
+
+    monkeypatch.setenv("QUORUM_LOG_LEVEL", "ERROR")
+    page = AppTest.from_file(str(script), default_timeout=120)
+    page.run()
+
+    assert not page.exception, [str(e.value) for e in page.exception]
+    assert [tab.label for tab in page.tabs][:1] == ["Record"]

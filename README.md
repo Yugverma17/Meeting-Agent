@@ -8,6 +8,7 @@ meetings — verifying against external evidence whether the work was really don
 and chasing, escalating or closing each item on its own.
 
 ```bash
+python -m quorum.cli ui          # the interface, in your browser
 python -m quorum.cli record      # sit on a live Meet/Zoom call and capture it
 python -m quorum.cli demo        # watch it run an 8-week project
 python -m quorum.cli evaluate    # reproduce the numbers below
@@ -717,6 +718,47 @@ provider-native tool calling — Gemini and Groq expose different tool-calling
 shapes, and one code path keeps the cache, quota accounting, failover and
 tracing already attached to it.
 
+## The interface
+
+```bash
+quorum ui
+```
+
+Opens at `localhost:8501`: a sidebar of projects, a Record button, the notes and
+transcript, a chat pane, and the to-do list with buttons for triage, calendar
+and Gmail drafts.
+
+**Local, and necessarily so.** Recording system audio needs WASAPI loopback
+access, which nothing running on a server can have. The browser is only the
+face - the recording, the models and your data never leave the laptop. Streamlit
+telemetry is turned off at launch, because a tool that phones home about a page
+displaying your colleagues' words is not one to leave on by default.
+
+It is a face on the product, not a second copy of it. Every button calls the
+same function the CLI calls, so a rule that holds in the terminal holds here -
+including the approval gate. A button is a nicer way to say yes than typing "y";
+it is not a way to skip being asked.
+
+Two things fight Streamlit, and both are handled rather than worked around:
+
+**The script re-runs on every interaction.** A forty-minute recording cannot
+live in a local variable. It lives in `session_state`, and only the timer
+redraws each second - via `@st.fragment`, so clicking Stop does not re-execute
+the page and close half-typed text with it. `RecordingSession.begin` refuses to
+start a second recording, because a double-click would otherwise open a second
+pair of streams on the same devices and the two would fight over the microphone.
+
+**Elapsed time is the wall clock**, not the recorder's `captured_seconds` -
+that sums both channels and reads as roughly double, which is how a nine-minute
+lecture once reported "listening 16.5 min" and looked like half of it had gone
+missing.
+
+Testing a Streamlit app is worth a note. The script fails at *render* time, and
+a plain HTTP request returns 200 for the shell however broken it is - so a
+smoke test that fetches the page proves nothing. `streamlit.testing.v1.AppTest`
+executes it properly, and found a wrong dict key (`found['system']` where the
+recorder returns `found['loopback']`) on the first run.
+
 ## What a meeting produces
 
 ```bash
@@ -1054,7 +1096,7 @@ python -m quorum.cli auth             # authorise Google Calendar (optional)
 python -m quorum.cli resume --list    # runs a quota wall interrupted
 python -m quorum.cli name --project X # what is recorded, and its @handle
 python -m quorum.cli chat --project X # ask about it, or tell it to do something
-pytest -m "not live"                  # 624 tests
+pytest -m "not live"                  # 634 tests
 ```
 
 For the calendar you also need a Desktop OAuth client: create one at

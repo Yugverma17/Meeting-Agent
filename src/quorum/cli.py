@@ -737,6 +737,53 @@ def drafts(
 
 
 @app.command()
+def ui(
+    port: int = typer.Option(8501, help="Port to serve on."),
+    open_browser: bool = typer.Option(True, help="Open a browser window."),
+) -> None:
+    """Open the interface in your browser.
+
+    Runs on this laptop rather than on a server: recording your system audio
+    needs direct hardware access, which nothing remote can have. The browser is
+    only the face - the recording, the models and your data stay here.
+    """
+    import subprocess
+
+    setup_logging("WARNING")
+    ensure_dirs()
+
+    try:
+        import streamlit  # noqa: F401
+    except ImportError:
+        console.print("[red]Streamlit is not installed.[/red]")
+        console.print("  [bold]pip install streamlit[/bold]")
+        raise typer.Exit(1)
+
+    script = Path(__file__).parent / "ui" / "app.py"
+    if not script.exists():  # pragma: no cover - packaging accident
+        console.print(f"[red]Interface not found at {script}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold]Quorum[/bold] on [cyan]http://localhost:{port}[/cyan]")
+    console.print("[dim]Everything runs on this machine. Ctrl+C here to stop.[/dim]")
+
+    command = [
+        sys.executable, "-m", "streamlit", "run", str(script),
+        "--server.port", str(port),
+        "--server.headless", "true" if not open_browser else "false",
+        # Telemetry off: this page displays meeting transcripts, and a tool that
+        # phones home about a page showing your colleagues' words is not one to
+        # leave on by default.
+        "--browser.gatherUsageStats", "false",
+        "--server.fileWatcherType", "none",
+    ]
+    try:
+        subprocess.run(command, check=False)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped.[/dim]")
+
+
+@app.command()
 def week(
     project_name: str = typer.Option("", "--project", help="Which project."),
     days: int = typer.Option(7, help="How far back to look."),
