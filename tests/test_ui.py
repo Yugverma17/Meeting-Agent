@@ -163,3 +163,53 @@ def test_the_page_renders_without_raising(tmp_path, monkeypatch):
 
     assert not page.exception, [str(e.value) for e in page.exception]
     assert [tab.label for tab in page.tabs][:1] == ["Record"]
+
+
+# --- outcomes must outlive the rerun that erases the page --------------------
+
+
+def test_a_recording_outcome_survives_a_rerun(monkeypatch):
+    """Streamlit draws a message once and forgets it. A recording finished, said
+    why it had failed, and the message was wiped before it could be read - the
+    user saw an empty Library and a Record tab offering a fresh recording, with
+    no sign anything had happened."""
+    import streamlit as st
+
+    from quorum.ui import app
+
+    store: dict = {}
+    monkeypatch.setattr(st, "session_state", store, raising=False)
+
+    app._remember("error", "No audio was captured.", "Check the microphone.")
+
+    assert store["last_outcome"]["state"] == "error"
+    assert "No audio" in store["last_outcome"]["headline"]
+    assert store["last_outcome"]["detail"]
+
+
+def test_the_newest_outcome_replaces_the_last(monkeypatch):
+    import streamlit as st
+
+    from quorum.ui import app
+
+    store: dict = {}
+    monkeypatch.setattr(st, "session_state", store, raising=False)
+
+    app._remember("error", "first")
+    app._remember("ok", "second")
+
+    assert store["last_outcome"]["headline"] == "second"
+
+
+def test_every_ending_of_a_recording_reports_something():
+    """Each early return in `_finish_recording` is a path a user can hit after
+    waiting two minutes. None of them may end silently."""
+    import inspect
+
+    from quorum.ui import app
+
+    source = inspect.getsource(app._finish_recording)
+    endings = [line for line in source.splitlines() if line.strip() == "return"]
+
+    assert len(endings) >= 3
+    assert source.count("_remember(") >= len(endings)

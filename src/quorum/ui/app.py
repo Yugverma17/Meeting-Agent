@@ -60,6 +60,41 @@ def _toast_error(exc: Exception, doing: str) -> None:
     st.error(f"{doing} failed: {type(exc).__name__}: {exc}")
 
 
+def _remember(state: str, headline: str, detail: str = "") -> None:
+    """Record the outcome of something slow, so a later rerun cannot erase it.
+
+    Streamlit draws a message once and forgets it. Anything that reruns the
+    script - a tab switch that touches a widget, the recording timer, a click
+    anywhere - wipes what was on the page.
+
+    That made a two-minute operation report into a void: a recording finished,
+    said why it had failed, and the message was gone before it could be read.
+    The user saw an empty Library and a Record tab offering a fresh recording,
+    with no indication that anything had happened at all.
+
+    Outcomes therefore live in session state and are redrawn every run until
+    dismissed. The rule is worth stating generally: the longer the work, the
+    less acceptable it is for its result to be transient.
+    """
+    st.session_state["last_outcome"] = {
+        "state": state, "headline": headline, "detail": detail,
+    }
+
+
+def _show_last_outcome() -> None:
+    outcome = st.session_state.get("last_outcome")
+    if not outcome:
+        return
+
+    render = {"ok": st.success, "warn": st.warning}.get(outcome["state"], st.error)
+    render(outcome["headline"])
+    if outcome["detail"]:
+        st.markdown(outcome["detail"])
+    if st.button("Dismiss", key="dismiss_outcome"):
+        st.session_state.pop("last_outcome", None)
+        st.rerun()
+
+
 # ---------------------------------------------------------------------------
 # Sidebar: which project
 # ---------------------------------------------------------------------------
@@ -255,6 +290,8 @@ def record_tab(project_id: str | None) -> None:
             _finish_recording(session)
         return
 
+    _show_last_outcome()
+
     st.subheader("Record")
     kind = st.segmented_control(
         "What is this?", ["Meeting", "Lecture (video)", "Lecture (in a room)"],
@@ -367,10 +404,15 @@ def _finish_recording(session) -> None:
         chunks = session.chunks()
         if not chunks:
             status.update(label="Nothing recorded", state="error")
-            st.error(
-                "No audio was captured. "
-                + ("Was the video playing, and the tab unmuted?"
-                   if session.system_only else "Is the microphone muted?")
+            _remember(
+                "error", "No audio was captured — nothing was saved.",
+                ("This mode listens to your **speakers**. If the lecture was "
+                 "happening in the room rather than playing on this laptop, "
+                 "choose **Lecture (in a room)** — that listens to the "
+                 "microphone."
+                 if session.system_only else
+                 "This mode listens to your **microphone**. Check Windows has "
+                 "not blocked it: Settings → Privacy & security → Microphone."),
             )
             st.session_state.pop("recording", None)
             return
@@ -380,12 +422,17 @@ def _finish_recording(session) -> None:
             transcript, stats, echo = session.transcribe(chunks)
         except Exception as exc:  # noqa: BLE001
             status.update(label="Transcription failed", state="error")
-            _toast_error(exc, "Transcribing")
+            _remember("error", f"Transcription failed: {type(exc).__name__}: {exc}")
+            st.session_state.pop("recording", None)
             return
 
         if transcript is None:
             status.update(label="No speech recognised", state="error")
-            st.error("Nothing was recognised in the audio.")
+            _remember(
+                "warn", "Audio was captured, but no speech was recognised in it.",
+                "If the room was quiet or the speaker was far away, the "
+                "microphone may not have picked up enough to transcribe.",
+            )
             st.session_state.pop("recording", None)
             return
 
@@ -397,10 +444,32 @@ def _finish_recording(session) -> None:
                        "attributed to you.")
 
         project = _project(session.project_id) if session.project_id else None
-        if session.kind == "lecture":
-            _finish_lecture(session, transcript, project, status)
-        else:
-            _finish_meeting(session, transcript, project, status)
+
+        # Saved here, before any analysis. The words have already cost
+        # audio-seconds from a budget that does not refill, and every step after
+        # this one can fail: quota walls, a provider outage, a parse error. The
+        # first version wrote the transcript only after note-taking succeeded,
+        # so a failure in the analysis discarded the recording entirely and the
+        # project showed no recordings at all.
+        saved_to = _persist_transcript(transcript, project)
+        st.write(f"Transcript saved — {len(transcript.utterances)} utterances")
+
+        try:
+            if session.kind == "lecture":
+                _finish_lecture(session, transcript, project, status)
+            else:
+                _finish_meeting(session, transcript, project, status)
+        except Exception as exc:  # noqa: BLE001 - the transcript is already safe
+            status.update(label="Saved, but the analysis failed", state="error")
+            _remember(
+                "warn",
+                f"Your recording is safe, but the analysis failed: "
+                f"{type(exc).__name__}: {exc}",
+                f"The transcript is at `{saved_to}` and shows in Library. "
+                f"Re-run the analysis without recording again:\n\n"
+                f"```\nquorum learn --from-transcript {saved_to} "
+                f"--project {session.project_id or '<name>'}\n```",
+            )
 
     st.session_state.pop("recording", None)
 
@@ -424,7 +493,6 @@ def _finish_lecture(session, transcript, project, status) -> None:
     except Exception:  # noqa: BLE001 - a bonus section must not cost the notes
         pass
 
-    _persist_transcript(transcript, project)
     if project is not None:
         from quorum.chat.naming import register_meeting
         from quorum.memory import ProjectMemory
@@ -438,8 +506,12 @@ def _finish_lecture(session, transcript, project, status) -> None:
         handle = register_meeting(project, transcript)
         _workspace().save(project)
         status.update(label=f"Done — saved as @{handle}", state="complete")
+        _remember("ok", f"Saved to {project.meta.name} as @{handle}.",
+                  "The notes and transcript are in **Library**.")
     else:
         status.update(label="Done", state="complete")
+        _remember("warn", "Analysed, but not saved to any project.",
+                  "Pick a project in the sidebar before recording to keep it.")
 
     st.session_state["last_notes"] = notes.as_markdown()
 
@@ -455,9 +527,12 @@ def _finish_meeting(session, transcript, project, status) -> None:
     )
     if outcome.status is RunStatus.INTERRUPTED:
         status.update(label="Interrupted", state="error")
-        st.error(f"Extraction stopped: {outcome.error}")
-        st.info(f"Nothing is lost — the transcript is checkpointed. "
-                f"Resume from the terminal: `quorum resume {transcript.meeting_id}`")
+        _remember(
+            "warn", f"Extraction stopped: {outcome.error}",
+            "**Nothing is lost** — the transcript is saved and checkpointed. "
+            "Continue it:\n\n"
+            f"```\nquorum resume {transcript.meeting_id}\n```",
+        )
         return
 
     record = outcome.record
@@ -482,23 +557,28 @@ def _finish_meeting(session, transcript, project, status) -> None:
             label=f"Done — {len(record.commitments)} commitment(s), saved as @{handle}",
             state="complete",
         )
+        _remember(
+            "ok",
+            f"Saved to {project.meta.name} as @{handle} — "
+            f"{len(record.commitments)} commitment(s).",
+            "Minutes and transcript are in **Library**; deadlines are in **To-dos**.",
+        )
     else:
-        _persist_transcript(transcript, None)
         status.update(label=f"Done — {len(record.commitments)} commitment(s)",
                       state="complete")
+        _remember("warn", "Analysed, but not saved to any project.",
+                  "Pick a project in the sidebar before recording to keep it.")
 
 
-def _persist_transcript(transcript, project) -> None:
+def _persist_transcript(transcript, project):
+    """Write the words to disk and say where. Called before anything can fail."""
     from quorum.config import RUNS_DIR
 
-    if project is not None:
-        folder = project.transcripts_dir
-    else:
-        folder = RUNS_DIR / "transcripts"
+    folder = project.transcripts_dir if project is not None else RUNS_DIR / "transcripts"
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / f"{transcript.meeting_id}.json").write_text(
-        transcript.model_dump_json(indent=2), encoding="utf-8"
-    )
+    path = folder / f"{transcript.meeting_id}.json"
+    path.write_text(transcript.model_dump_json(indent=2), encoding="utf-8")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +587,8 @@ def _persist_transcript(transcript, project) -> None:
 
 
 def library_tab(project_id: str | None) -> None:
+    _show_last_outcome()
+
     if st.session_state.get("last_notes"):
         with st.expander("Notes from what you just recorded", expanded=True):
             st.markdown(st.session_state["last_notes"])
