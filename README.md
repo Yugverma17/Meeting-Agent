@@ -1126,7 +1126,7 @@ python -m quorum.cli auth             # authorise Google Calendar (optional)
 python -m quorum.cli resume --list    # runs a quota wall interrupted
 python -m quorum.cli name --project X # what is recorded, and its @handle
 python -m quorum.cli chat --project X # ask about it, or tell it to do something
-pytest -m "not live"                  # 657 tests
+pytest -m "not live"                  # 656 tests
 ```
 
 For the calendar you also need a Desktop OAuth client: create one at
