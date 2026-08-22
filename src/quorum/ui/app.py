@@ -81,7 +81,14 @@ def _remember(state: str, headline: str, detail: str = "") -> None:
     }
 
 
-def _show_last_outcome() -> None:
+def _show_last_outcome(where: str) -> None:
+    """Draw the last outcome, on whichever tab is asking.
+
+    `where` is not decoration. Streamlit renders every tab in a single pass, so
+    showing this on both Record and Library creates two widgets in one run - and
+    two buttons carrying the same key is a hard error that replaces the entire
+    page with a traceback. The tab name makes each key unique.
+    """
     outcome = st.session_state.get("last_outcome")
     if not outcome:
         return
@@ -90,7 +97,7 @@ def _show_last_outcome() -> None:
     render(outcome["headline"])
     if outcome["detail"]:
         st.markdown(outcome["detail"])
-    if st.button("Dismiss", key="dismiss_outcome"):
+    if st.button("Dismiss", key=f"dismiss_outcome_{where}"):
         st.session_state.pop("last_outcome", None)
         st.rerun()
 
@@ -290,7 +297,7 @@ def record_tab(project_id: str | None) -> None:
             _finish_recording(session)
         return
 
-    _show_last_outcome()
+    _show_last_outcome("record")
 
     st.subheader("Record")
     kind = st.segmented_control(
@@ -587,7 +594,7 @@ def _persist_transcript(transcript, project):
 
 
 def library_tab(project_id: str | None) -> None:
-    _show_last_outcome()
+    _show_last_outcome("library")
 
     if st.session_state.get("last_notes"):
         with st.expander("Notes from what you just recorded", expanded=True):

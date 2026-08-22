@@ -213,3 +213,54 @@ def test_every_ending_of_a_recording_reports_something():
 
     assert len(endings) >= 3
     assert source.count("_remember(") >= len(endings)
+
+
+@pytest.mark.slow
+def test_the_page_renders_with_an_outcome_showing(monkeypatch):
+    """The smoke test above passes with no outcome stored, because
+    `_show_last_outcome` returns before creating anything. That hid a real
+    crash: the outcome is drawn on Record *and* Library, Streamlit renders every
+    tab in one pass, and two buttons sharing a key replaces the whole page with
+    a traceback. Seeding the state is what exercises it."""
+    import pathlib
+
+    import quorum.ui
+    from streamlit.testing.v1 import AppTest
+
+    script = pathlib.Path(quorum.ui.__file__).parent / "app.py"
+    monkeypatch.setenv("QUORUM_LOG_LEVEL", "ERROR")
+
+    page = AppTest.from_file(str(script), default_timeout=120)
+    page.session_state["last_outcome"] = {
+        "state": "error", "headline": "No audio was captured.", "detail": "Check the mode.",
+    }
+    page.run()
+
+    assert not page.exception, [str(e.value) for e in page.exception]
+    dismiss = [b for b in page.button if b.label == "Dismiss"]
+    assert len(dismiss) == 2, "shown on Record and Library, with distinct keys"
+
+
+def test_no_two_widgets_share_a_key():
+    """A duplicate key is a hard error that replaces the page with a traceback,
+    and it only appears once the relevant branch renders - so it is worth
+    checking statically rather than waiting to hit it."""
+    import ast
+    import pathlib
+    from collections import Counter
+
+    import quorum.ui
+
+    source = pathlib.Path(quorum.ui.__file__).parent / "app.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+
+    literal_keys = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "key" and isinstance(keyword.value, ast.Constant):
+                literal_keys.append(keyword.value.value)
+
+    repeated = [key for key, count in Counter(literal_keys).items() if count > 1]
+    assert repeated == [], f"these literal keys appear more than once: {repeated}"
