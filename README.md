@@ -734,6 +734,41 @@ face - the recording, the models and your data never leave the laptop. Streamlit
 telemetry is turned off at launch, because a tool that phones home about a page
 displaying your colleagues' words is not one to leave on by default.
 
+### Mathematics through a JSON string
+
+Asked for the AdaBoost update rule, the chat returned this:
+
+```
+(displaystyle epsilon_t = ♠rac{sum w_i}{sum w_j})
+w_i^{(t+1)} = w_i^{(t)}    imes exp!␈igl(-alpha_t ...␈igr)
+```
+
+Three faults stacked, and only the last is about rendering.
+
+**JSON ate the commands.** Structured output arrives as a JSON string, and a
+model writing LaTeX into one rarely doubles its backslashes. ``, `	`, ``,
+`
+` and `` are *valid* JSON escapes, so the parser consumes them and keeps
+the remainder of the word — `rac` becomes formfeed + `"rac"`, `	imes`
+becomes tab + `"imes"`. A formfeed inside a word is not prose; it is a command
+with its backslash eaten, and it can be put back.
+
+**Lenient parsing dropped the rest.** Escapes JSON does not recognise lose their
+backslash silently, which is how `\displaystyle \epsilon` became
+`displaystyle epsilon`. Nothing marks the damage, so this is only repairable
+*inside* a maths region — between dollar signs a bare `sum` can only be the
+operator, while in prose it is an English word that must be left alone.
+
+**The delimiters were unrenderable.** The model wrote `\( \)`; KaTeX-in-markdown
+reads `$` and `$$`.
+
+The prompt now asks for dollar delimiters and doubled backslashes. This module
+exists because a prompt is a request, and the content has to survive a model
+that ignores it. The instruction itself needed fixing too: written as an
+ordinary Python literal, the examples warning about eaten backslashes had their
+own eaten, so the model was advised that `"rac silently becomes rac"` with the
+backslash already missing from both halves.
+
 ### Signing in
 
 Google downloads the OAuth client as
@@ -1126,7 +1161,7 @@ python -m quorum.cli auth             # authorise Google Calendar (optional)
 python -m quorum.cli resume --list    # runs a quota wall interrupted
 python -m quorum.cli name --project X # what is recorded, and its @handle
 python -m quorum.cli chat --project X # ask about it, or tell it to do something
-pytest -m "not live"                  # 658 tests
+pytest -m "not live"                  # 678 tests
 ```
 
 For the calendar you also need a Desktop OAuth client: create one at
